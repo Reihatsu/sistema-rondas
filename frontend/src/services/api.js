@@ -3,9 +3,42 @@ import axios from "axios";
 export const TOKEN_KEY = "sistema-rondas.token";
 export const USER_KEY = "sistema-rondas.user";
 
-// En desarrollo, Vite hace proxy de /api hacia FastAPI (ver vite.config.js).
+// URL usada en desarrollo local cuando VITE_API_BASE_URL no está definida.
+const DEFAULT_API_BASE_URL = "http://localhost:8000/api/v1";
+
+const ABSOLUTE_URL_PATTERN = /^https?:\/\//i;
+
+/**
+ * Resuelve la baseURL de Axios a partir de la variable de Vite.
+ *
+ * Vite solo expone las variables con prefijo `VITE_` y las incrusta en el
+ * bundle durante el build (en Vercel hay que redeployar tras cambiarlas).
+ * Se exige una URL absoluta: una ruta relativa como `/api/v1` se resolvería
+ * contra el dominio actual (el de Vercel) y no contra el backend.
+ */
+function resolveApiBaseUrl(rawBaseUrl) {
+  const value = typeof rawBaseUrl === "string" ? rawBaseUrl.trim() : "";
+  if (!value) {
+    return DEFAULT_API_BASE_URL;
+  }
+  if (!ABSOLUTE_URL_PATTERN.test(value)) {
+    console.warn(
+      "[api] VITE_API_BASE_URL debe ser una URL absoluta (http:// o https://). " +
+        `Se ignorará "${value}" para no usar el dominio actual.`,
+    );
+    return DEFAULT_API_BASE_URL;
+  }
+  // Sin barra final para no generar URLs con "//" al concatenar las rutas.
+  return value.replace(/\/+$/, "");
+}
+
+/** Base absoluta de la API; Axios nunca antepone el dominio del frontend. */
+export const API_BASE_URL = resolveApiBaseUrl(
+  import.meta.env.VITE_API_BASE_URL,
+);
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "/api/v1",
+  baseURL: API_BASE_URL,
   timeout: 15000,
   headers: { "Content-Type": "application/json" },
 });

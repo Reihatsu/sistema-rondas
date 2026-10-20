@@ -2,9 +2,9 @@
 
 Monorepo de un sistema de control de rondas de vigilancia con checkpoints NFC.
 
-- **Backend**: FastAPI + SQLAlchemy 2 + MySQL (PyMySQL) + JWT (OAuth2 password flow).
+- **Backend**: FastAPI + SQLAlchemy 2 + MySQL (PyMySQL) / SQLite (fallback) + JWT (OAuth2 password flow).
 - **Frontend**: React 18 + Vite + Tailwind CSS + Lucide React + React Router + Axios.
-- **Base de datos**: scripts SQL en `database/` y migraciones Alembic en `backend/alembic/`.
+- **Base de datos**: MySQL local o SQLite para despliegues gratuitos (Render); scripts SQL en `database/` y migraciones Alembic en `backend/alembic/`.
 
 ```
 sistema-rondas/
@@ -40,11 +40,25 @@ sistema-rondas/
 
 - Python 3.11+
 - Node.js 18+
-- MySQL 8 (o MariaDB 10.6+)
+- MySQL 8 (o MariaDB 10.6+) **o** SQLite (incluido en Python, sin instalación)
 
 ## 1. Base de datos
 
-Opción A — scripts SQL (crea esquema y datos demo):
+El backend elige el motor automáticamente:
+
+| Condición | Motor usado |
+| --- | --- |
+| `DATABASE_URL` definida | La URL indicada (máxima prioridad) |
+| `USE_SQLITE=true` | SQLite (`backend/sistema_rondas.db`) |
+| Alguna variable `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME` | MySQL con PyMySQL |
+| Ninguna de las anteriores | SQLite como *fallback* (`backend/sistema_rondas.db`) |
+
+Al arrancar, la API crea las tablas (`create_all`) y, si la base de datos está
+vacía, siembra empresa, usuarios, puntos de control y rondas demo
+(`AUTO_SEED_DEMO=true`). Por eso en Render solo hace falta desplegar: no hay
+que ejecutar SQL ni migraciones manualmente.
+
+### Opción A — scripts SQL (MySQL, crea esquema y datos demo):
 
 ```bash
 mysql -u root -p < database/schema.sql
@@ -70,7 +84,8 @@ python init_db.py
 Es idempotente (puede ejecutarse varias veces), crea la base de datos y las
 tablas vía SQLAlchemy y guarda las contraseñas con **bcrypt**. Use
 `python init_db.py --skip-create-db` si la base ya existe o el usuario MySQL no
-tiene permiso `CREATE DATABASE`.
+tiene permiso `CREATE DATABASE`. El mismo comando funciona con SQLite:
+`$env:USE_SQLITE="true"; python init_db.py` (PowerShell).
 
 ## 2. Backend
 
@@ -89,11 +104,42 @@ Variables relevantes de `.env`:
 
 | Variable | Descripción |
 | --- | --- |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Conexión MySQL |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Conexión MySQL (si se define alguna, se usa MySQL) |
+| `USE_SQLITE` | `true` fuerza SQLite aunque haya variables MySQL |
+| `SQLITE_DB_PATH` | Ruta del archivo SQLite (por defecto `backend/sistema_rondas.db`) |
 | `DATABASE_URL` | Sobrescribe la conexión (p. ej. SQLite en pruebas) |
 | `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES` | Firma del JWT |
 | `BACKEND_CORS_ORIGINS` | Orígenes permitidos (Vite en 5173) |
 | `INIT_DB_ON_STARTUP`, `AUTO_SEED_ADMIN` | Bootstrap de tablas y admin |
+| `AUTO_SEED_DEMO` | Siembra datos demo cuando la base de datos está vacía |
+
+### Despliegue en Render (SQLite, plan gratuito)
+
+Puede crear el servicio manualmente o usar el blueprint `render.yaml` incluido
+en la raíz del repositorio (**New → Blueprint**). Pasos manuales:
+
+1. Cree un **Web Service** apuntando al repositorio.
+2. **Root Directory**: `backend`.
+3. **Build Command**: `pip install -r requirements.txt`.
+4. **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+5. Variables de entorno mínimas:
+   - `SECRET_KEY` (obligatoria en producción).
+   - `BACKEND_CORS_ORIGINS` con la URL del frontend (p. ej.
+     `https://mi-frontend.onrender.com`).
+   - **No** defina `DB_*`: al no detectarlas, el backend usa SQLite
+     (`backend/sistema_rondas.db`), crea las tablas y siembra los datos demo.
+6. Opcional: monte un **Persistent Disk** y defina `SQLITE_DB_PATH` hacia ese
+   disco para conservar los datos entre despliegues (el disco efímero del plan
+   gratuito se reinicia al redeploy).
+
+`/health` devuelve `database_backend` (`mysql` o `sqlite`) para verificar qué
+motor está activo. La API también escucha en `0.0.0.0:$PORT` si se arranca con
+`python main.py` en Render.
+
+> **Seguridad:** las cuentas demo (`admin@demo.com` / `admin123`, etc.) son
+> públicas y existen solo para pruebas. En un entorno real defina
+> `AUTO_SEED_DEMO=false` y configure `FIRST_ADMIN_EMAIL` /
+> `FIRST_ADMIN_PASSWORD` con credenciales propias **antes** del primer arranque.
 
 ## 3. Frontend
 
@@ -104,8 +150,15 @@ npm run dev      # http://localhost:5173
 npm run build    # bundle de producción en dist/
 ```
 
-El proxy de Vite redirige `/api` al backend, por lo que no hace falta configurar
-CORS en desarrollo. Para apuntar a otra API: `VITE_API_URL=http://host:8000/api/v1`.
+La URL base de Axios se toma de `VITE_API_BASE_URL`, que debe ser **absoluta** e
+incluir `/api/v1` (por ejemplo `https://mi-api.onrender.com/api/v1`). Si no está
+definida se usa `http://localhost:8000/api/v1`; el backend ya permite CORS desde
+el frontend local (`http://localhost:5173`).
+
+En **Vercel**, configure `VITE_API_BASE_URL` en *Project Settings → Environment
+Variables* y vuelva a desplegar: Vite incrusta la variable en el bundle durante
+el build. Las rutas relativas se ignoran para que Axios nunca envíe las
+peticiones al dominio del frontend.
 
 La interfaz sigue un esquema visual inspirado en Odoo ERP (paleta púrpura,
 tablas densas, barra de filtros y badges de estado) y es responsive. Las rutas

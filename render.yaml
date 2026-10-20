@@ -1,0 +1,29 @@
+# Blueprint de Render para la API del Sistema de Rondas.
+#
+# Despliegue gratuito con SQLite: al no definir variables DB_*, el backend usa
+# `backend/sistema_rondas.db`, crea el esquema y siembra los datos demo.
+#
+# Nota: el plan gratuito usa disco efímero, por lo que los datos se reinician en
+# cada despliegue. Para conservarlos, añada un disco persistente y defina
+# SQLITE_DB_PATH apuntando a la ruta montada (por ejemplo /var/data/sistema_rondas.db).
+services:
+  - type: web
+    name: sistema-rondas-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # bcrypt 4.0.1 / pydantic 2.10.4 se instalan con wheels en Python 3.12.
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BACKEND_CORS_ORIGINS
+        sync: false
+      - key: AUTO_SEED_DEMO
+        value: "true"
