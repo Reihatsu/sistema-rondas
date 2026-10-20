@@ -1,0 +1,26 @@
+# --- Python / Backend ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+backend/.env
+
+# --- Base de datos local / pruebas ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Node / Frontend ---
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.vite/
+
+# --- Editores / Sistema ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

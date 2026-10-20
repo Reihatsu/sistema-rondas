@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Sistema de Rondas - Dependencias del Backend
+# Instalación:  pip install -r requirements.txt
+# ---------------------------------------------------------------------------
+
+# --- Framework web ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Base de datos / ORM / migraciones ---
+sqlalchemy==2.0.36
+pymysql==1.1.1
+cryptography==44.0.0
+alembic==1.14.0
+
+# --- Validación y configuración ---
+pydantic==2.10.4
+python-dotenv==1.0.1
+
+# --- Seguridad / autenticación ---
+passlib[bcrypt]==1.7.4
+# bcrypt 4.1+ rompe la detección de backend de passlib 1.7.4:
+# "AttributeError: module 'bcrypt' has no attribute '__about__'".
+bcrypt==4.0.1
+python-jose[cryptography]==3.3.0
