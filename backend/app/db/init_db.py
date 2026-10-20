@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -53,6 +53,50 @@ def database_is_empty(db: Session) -> bool:
     return db.scalar(select(func.count()).select_from(User)) == 0
 
 
+#: Columnas agregadas después de la creación inicial de las tablas.
+#: ``create_all`` no modifica tablas existentes, así que en instalaciones que
+#: no ejecutan Alembic se añaden aquí de forma idempotente.
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("checkpoints", "latitude", "FLOAT NULL"),
+    ("checkpoints", "longitude", "FLOAT NULL"),
+    ("checkpoints", "geofence_radius_m", "INTEGER NOT NULL DEFAULT 50"),
+    ("round_logs", "checkpoint_id", "INTEGER NULL"),
+    ("round_logs", "latitude", "FLOAT NULL"),
+    ("round_logs", "longitude", "FLOAT NULL"),
+    ("round_logs", "distance_m", "FLOAT NULL"),
+)
+
+
+def sync_additive_columns() -> None:
+    """Añade columnas nuevas a tablas ya existentes (compatibilidad con ``create_all``).
+
+    Es una red de seguridad para instalaciones que arrancan con
+    ``INIT_DB_ON_STARTUP`` y nunca ejecutan ``alembic upgrade head``. Solo
+    agrega columnas nulables o con valor por defecto, de modo que no destruye
+    información ni obliga a recrear las tablas.
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table, column, ddl in _ADDITIVE_COLUMNS:
+        if table not in existing_tables:
+            continue
+        existing_columns = {
+            item["name"] for item in inspector.get_columns(table)
+        }
+        if column in existing_columns:
+            continue
+
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+
+        logger.warning(
+            "Columna %s.%s añadida automáticamente (esquema previo sin migrar).",
+            table,
+            column,
+        )
+
+
 def init_db() -> None:
     """Crea la base de datos/tablas y siembra los datos iniciales.
 
@@ -62,6 +106,7 @@ def init_db() -> None:
     """
     create_database_if_not_exists()
     Base.metadata.create_all(bind=engine)
+    sync_additive_columns()
     logger.info(
         "Esquema de base de datos verificado (create_all) en %s.",
         settings.database_backend,

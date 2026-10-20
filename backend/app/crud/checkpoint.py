@@ -81,6 +81,24 @@ def list_checkpoints(
     return items, total
 
 
+def list_active_by_company(db: Session, company_id: int) -> list[Checkpoint]:
+    """Devuelve los puntos activos de una empresa ordenados por nombre.
+
+    Se usa en el módulo operativo del guardia: los checkpoints de la ronda
+    son los puntos activos de la empresa, no un listado administrativo.
+    """
+    return list(
+        db.scalars(
+            select(Checkpoint)
+            .where(
+                Checkpoint.company_id == company_id,
+                Checkpoint.is_active.is_(True),
+            )
+            .order_by(Checkpoint.name.asc(), Checkpoint.id.asc())
+        )
+    )
+
+
 def create_checkpoint(db: Session, payload: CheckpointCreate) -> Checkpoint:
     """Crea y persiste un punto de control."""
     checkpoint = Checkpoint(**payload.model_dump())

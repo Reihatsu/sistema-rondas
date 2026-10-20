@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS `checkpoints` (
     `name`                 VARCHAR(150) NOT NULL,
     `code`                 VARCHAR(100) NOT NULL,
     `location_description` TEXT         NULL,
+    `latitude`             FLOAT        NULL,
+    `longitude`            FLOAT        NULL,
+    `geofence_radius_m`    INT          NOT NULL DEFAULT 50,
     `is_active`            TINYINT(1)   NOT NULL DEFAULT 1,
     `created_at`           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -137,21 +140,28 @@ CREATE TABLE IF NOT EXISTS `rounds` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- Checkpoints NFC de cada ronda
+-- Checkpoints (NFC/QR) de cada ronda
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `round_logs` (
     `id`              INT          NOT NULL AUTO_INCREMENT,
     `round_id`        INT          NOT NULL,
+    `checkpoint_id`   INT          NULL,
     `nfc_tag_id`      VARCHAR(100) NOT NULL,
     `checkpoint_name` VARCHAR(150) NOT NULL,
+    `latitude`        FLOAT        NULL,
+    `longitude`       FLOAT        NULL,
+    `distance_m`      FLOAT        NULL,
     `timestamp`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `status` ENUM('OK', 'INCIDENT', 'SKIPPED') NOT NULL DEFAULT 'OK',
     PRIMARY KEY (`id`),
     KEY `ix_round_logs_round_id` (`round_id`),
+    KEY `ix_round_logs_checkpoint_id` (`checkpoint_id`),
     KEY `ix_round_logs_nfc_tag_id` (`nfc_tag_id`),
     KEY `ix_round_logs_timestamp` (`timestamp`),
     CONSTRAINT `fk_round_logs_round_id_rounds`
-        FOREIGN KEY (`round_id`) REFERENCES `rounds` (`id`) ON DELETE CASCADE
+        FOREIGN KEY (`round_id`) REFERENCES `rounds` (`id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_round_logs_checkpoint_id_checkpoints`
+        FOREIGN KEY (`checkpoint_id`) REFERENCES `checkpoints` (`id`) ON DELETE SET NULL
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------

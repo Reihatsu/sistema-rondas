@@ -4,6 +4,7 @@ Monorepo de un sistema de control de rondas de vigilancia con checkpoints NFC.
 
 - **Backend**: FastAPI + SQLAlchemy 2 + MySQL (PyMySQL) / SQLite (fallback) + JWT (OAuth2 password flow).
 - **Frontend**: React 18 + Vite + Tailwind CSS + Lucide React + React Router + Axios.
+- **Móvil**: Expo / React Native + Expo Router (`mobile/`), con escaneo QR y validación GPS de checkpoints.
 - **Base de datos**: MySQL local o SQLite para despliegues gratuitos (Render); scripts SQL en `database/` y migraciones Alembic en `backend/alembic/`.
 
 ```
@@ -17,13 +18,20 @@ sistema-rondas/
 │   │   ├── schemas/       # esquemas Pydantic
 │   │   ├── db/            # sesión, init_db, seed del admin
 │   │   └── main.py
-│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints)
+│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints, 0003_checkin_gps)
 │   ├── init_db.py         # crea tablas + datos demo (contraseñas bcrypt)
 │   ├── main.py            # entrypoint uvicorn
 │   └── requirements.txt
 ├── database/
 │   ├── schema.sql         # DDL MySQL equivalente a la migración
 │   └── seed.sql           # datos de demostración
+├── mobile/
+│   ├── src/
+│   │   ├── api/           # Axios + JWT + endpoints tipados
+│   │   ├── app/           # Rutas de Expo Router ((app)/rondas, (app)/scan)
+│   │   ├── screens/       # Login, Home, Rondas y QRScanner
+│   │   └── services/      # Sesión (AsyncStorage) y GPS (expo-location)
+│   └── app.json           # Plugins de cámara y ubicación
 └── frontend/
     ├── src/
     │   ├── layouts/OdooLayout.jsx   # sidebar + topbar responsive
@@ -207,7 +215,7 @@ imprimirlo; la baja es lógica (`is_active = false`) para conservar el históric
 | --- | --- |
 | `ADMIN` | Todo: empresas, usuarios, asignaciones, puntos de control y todas las rondas |
 | `SUPERVISOR` | Sus guardias, puntos de control (lectura/escritura) y rondas de sus empresas asignadas |
-| `GUARD` | Sus propias rondas |
+| `GUARD` | Sus propias rondas, checkpoints de la ronda y marcación QR con validación GPS |
 | `COMPANY_USER` | Rondas y puntos de control (solo lectura) de las empresas que tiene asignadas |
 
 Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
@@ -223,6 +231,8 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 - `GET|POST /api/v1/checkpoints`, `GET|PUT|DELETE /api/v1/checkpoints/{id}`
 - `GET /api/v1/rounds`, `GET /api/v1/rounds/summary`, `GET /api/v1/rounds/{id}`,
   `GET /api/v1/rounds/{id}/logs`, `POST /api/v1/rounds/{id}/comments`
+- `GET /api/v1/rounds/active` (solo `GUARD`), `GET /api/v1/rounds/{id}/checkpoints`,
+  `POST /api/v1/rounds/{id}/checkin`, `POST /api/v1/rounds/{id}/start`
 - `GET /health`
 
 ## 7. Validación rápida

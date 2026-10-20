@@ -58,6 +58,9 @@ DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
         "location_description": (
             "Mostrador de recepción, junto al acceso peatonal principal."
         ),
+        "latitude": 40.415462,
+        "longitude": -3.709687,
+        "geofence_radius_m": 50,
     },
     {
         "name": "Estacionamiento Nivel -1",
@@ -65,6 +68,9 @@ DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
         "location_description": (
             "Columna central del nivel -1, frente a la rampa vehicular."
         ),
+        "latitude": 40.415100,
+        "longitude": -3.710150,
+        "geofence_radius_m": 50,
     },
     {
         "name": "Bodega Principal",
@@ -72,6 +78,9 @@ DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
         "location_description": (
             "Puerta de acceso a la bodega principal, sector de carga."
         ),
+        "latitude": 40.414700,
+        "longitude": -3.709500,
+        "geofence_radius_m": 50,
     },
 )
 
@@ -116,6 +125,17 @@ COMPANY_USER_EMAIL = "cliente@demo.com"
 #: Rondas de demostración con sus checkpoints NFC.
 #: ``start_minutes_ago``/``end_minutes_ago`` son relativos al momento del seed.
 DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
+    {
+        "guard": "guardia1@demo.com",
+        "status": RoundStatus.IN_PROGRESS,
+        "start_minutes_ago": 10,
+        "end_minutes_ago": None,
+        "observations": (
+            "Ronda nocturna en curso: recorrido de los puntos de control "
+            "del perímetro. Permite probar el escaneo QR desde la app móvil."
+        ),
+        "logs": (),
+    },
     {
         "guard": "guardia1@demo.com",
         "status": RoundStatus.COMPLETED,
@@ -216,28 +236,41 @@ def _seed_assignments(company: Company, users: dict[str, User]) -> None:
 
 
 def _seed_checkpoints(db: Session, company: Company) -> int:
-    """Crea los puntos de control demo que aún no existan por código."""
-    existing_codes = set(
-        db.scalars(
-            select(Checkpoint.code).where(
+    """Crea los puntos demo que falten y completa sus coordenadas."""
+    existing = {
+        checkpoint.code: checkpoint
+        for checkpoint in db.scalars(
+            select(Checkpoint).where(
                 Checkpoint.company_id == company.id,
                 Checkpoint.code.in_(
                     [str(spec["code"]) for spec in DEMO_CHECKPOINTS]
                 ),
             )
         )
-    )
+    }
+
     created = 0
     for spec in DEMO_CHECKPOINTS:
         code = str(spec["code"])
-        if code in existing_codes:
+        checkpoint = existing.get(code)
+
+        if checkpoint is not None:
+            # Bases sembradas antes de la geovalla: se completan las
+            # coordenadas sin sobrescribir las que haya configurado el cliente.
+            if checkpoint.latitude is None:
+                checkpoint.latitude = float(spec["latitude"])
+                checkpoint.longitude = float(spec["longitude"])
             continue
+
         db.add(
             Checkpoint(
                 company_id=company.id,
                 name=str(spec["name"]),
                 code=code,
                 location_description=str(spec["location_description"]),
+                latitude=float(spec["latitude"]),
+                longitude=float(spec["longitude"]),
+                geofence_radius_m=int(spec.get("geofence_radius_m", 50)),
                 is_active=True,
             )
         )

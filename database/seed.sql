@@ -48,14 +48,18 @@ INSERT IGNORE INTO `supervisor_guards` (`supervisor_id`, `guard_id`) VALUES
 
 -- --- Puntos de control (QR/NFC) -------------------------------------------
 INSERT IGNORE INTO `checkpoints`
-    (`company_id`, `name`, `code`, `location_description`, `is_active`)
+    (`company_id`, `name`, `code`, `location_description`,
+     `latitude`, `longitude`, `geofence_radius_m`, `is_active`)
 VALUES
     (1, 'Recepción', 'QR-EMP1-PT01',
-     'Mostrador de recepción, junto al acceso peatonal principal.', 1),
+     'Mostrador de recepción, junto al acceso peatonal principal.',
+     40.415462, -3.709687, 50, 1),
     (1, 'Estacionamiento Nivel -1', 'QR-EMP1-PT02',
-     'Columna central del nivel -1, frente a la rampa vehicular.', 1),
+     'Columna central del nivel -1, frente a la rampa vehicular.',
+     40.415100, -3.710150, 50, 1),
     (1, 'Bodega Principal', 'QR-EMP1-PT03',
-     'Puerta de acceso a la bodega principal, sector de carga.', 1);
+     'Puerta de acceso a la bodega principal, sector de carga.',
+     40.414700, -3.709500, 50, 1);
 
 -- --- Rondas ----------------------------------------------------------------
 INSERT IGNORE INTO `rounds`

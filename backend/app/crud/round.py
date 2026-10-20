@@ -78,6 +78,41 @@ def list_logs(db: Session, round_id: int) -> list[RoundLog]:
     )
 
 
+def get_guard_active_round(db: Session, guard_id: int) -> Round | None:
+    """Devuelve la ronda operativa actual del guardia (en curso o pausada).
+
+    Si el guardia tuviera más de una ronda abierta por un error de datos, se
+    devuelve la más reciente para no bloquear la operación en el móvil.
+    """
+    return db.scalar(
+        select(Round)
+        .options(*ROUND_LOAD_OPTIONS, selectinload(Round.logs))
+        .where(
+            Round.guard_id == guard_id,
+            Round.status.in_((RoundStatus.IN_PROGRESS, RoundStatus.PAUSED)),
+        )
+        .order_by(Round.created_at.desc(), Round.id.desc())
+        .limit(1)
+    )
+
+
+def get_round_log_for_checkpoint(
+    db: Session,
+    round_id: int,
+    checkpoint_id: int,
+) -> RoundLog | None:
+    """Busca una marcación previa del mismo checkpoint en la ronda."""
+    return db.scalar(
+        select(RoundLog)
+        .where(
+            RoundLog.round_id == round_id,
+            RoundLog.checkpoint_id == checkpoint_id,
+        )
+        .order_by(RoundLog.timestamp.asc(), RoundLog.id.asc())
+        .limit(1)
+    )
+
+
 def count_by_status(
     db: Session,
     *,

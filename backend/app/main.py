@@ -58,7 +58,8 @@ def create_application() -> FastAPI:
         version=settings.VERSION,
         description=(
             "API del Sistema de Rondas: autenticación JWT, gestión de empresas, "
-            "usuarios y puntos de control, y consulta de rondas/checkpoints NFC."
+            "usuarios y puntos de control, consulta de rondas y marcación de "
+            "checkpoints QR con validación GPS."
         ),
         openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
         docs_url="/docs",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -65,7 +65,7 @@ class Round(Base):
 
 
 class RoundLog(Base):
-    """Lectura de un checkpoint NFC dentro de una ronda."""
+    """Lectura de un checkpoint (NFC o QR) dentro de una ronda."""
 
     __tablename__ = "round_logs"
 
@@ -73,8 +73,19 @@ class RoundLog(Base):
     round_id: Mapped[int] = mapped_column(
         ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    #: Punto de control marcado. Nulo en lecturas NFC antiguas que solo
+    #: guardaban el nombre y el identificador de la etiqueta.
+    checkpoint_id: Mapped[int | None] = mapped_column(
+        ForeignKey("checkpoints.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: Código leído del QR/NFC; se conserva para la trazabilidad histórica.
     nfc_tag_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     checkpoint_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    #: Coordenadas capturadas por el dispositivo al marcar por QR.
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Distancia calculada entre el guardia y el punto, en metros.
+    distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )

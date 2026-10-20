@@ -11,7 +11,9 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -39,6 +41,13 @@ class Checkpoint(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
     location_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Coordenadas del punto para validar la geovalla al marcar por QR.
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Radio (en metros) dentro del cual se acepta una marcación.
+    geofence_radius_m: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=50, server_default="50"
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1", index=True
     )
