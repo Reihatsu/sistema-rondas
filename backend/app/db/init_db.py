@@ -1,15 +1,28 @@
-"""Inicialización de la base de datos y datos mínimos de arranque."""
+"""Inicialización de la base de datos y datos de arranque.
+
+Se ejecuta al arrancar la API (``lifespan`` en ``app/main.py``) y es
+idempotente:
+
+* Crea la base de datos MySQL si no existe (en SQLite el archivo se crea solo).
+* Crea todas las tablas desde los modelos SQLAlchemy (``create_all``).
+* Si la base de datos está vacía, siembra los datos de demostración (empresa,
+  usuarios, puntos de control y rondas) siempre que ``AUTO_SEED_DEMO`` sea
+  verdadero. Esto permite que un despliegue gratuito en Render con SQLite
+  arranque con datos utilizables sin pasos manuales.
+* Crea el usuario ADMIN configurado (``AUTO_SEED_ADMIN``) si no existe.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal, create_database_if_not_exists, engine
 from app.core.security import hash_password
+from app.db.seed import DEMO_USERS, seed_demo_data
 from app.models import Base, User, UserRole  # importa todos los modelos
 
 logger = logging.getLogger(__name__)
@@ -35,8 +48,13 @@ def seed_admin(db: Session) -> None:
     logger.info("Usuario ADMIN inicial creado: %s", admin.email)
 
 
+def database_is_empty(db: Session) -> bool:
+    """Indica si no hay ningún usuario (base de datos recién creada)."""
+    return db.scalar(select(func.count()).select_from(User)) == 0
+
+
 def init_db() -> None:
-    """Crea la base de datos (si no existe), las tablas y el admin inicial.
+    """Crea la base de datos/tablas y siembra los datos iniciales.
 
     Se ejecuta al arrancar la API (ver ``lifespan`` en ``app/main.py``) y es
     idempotente. Para entornos con migraciones controladas, desactive
@@ -44,8 +62,22 @@ def init_db() -> None:
     """
     create_database_if_not_exists()
     Base.metadata.create_all(bind=engine)
-    logger.info("Esquema de base de datos verificado (create_all).")
+    logger.info(
+        "Esquema de base de datos verificado (create_all) en %s.",
+        settings.database_backend,
+    )
 
-    if settings.AUTO_SEED_ADMIN:
-        with SessionLocal() as db:
+    with SessionLocal() as db:
+        if settings.AUTO_SEED_DEMO and database_is_empty(db):
+            stats = seed_demo_data(db)
+            logger.warning(
+                "Base de datos vacía: se cargaron los datos de demostración "
+                "(%d usuarios, %d puntos de control). Cuentas: %s. "
+                "Defina AUTO_SEED_DEMO=false para desactivarlo.",
+                stats["users"],
+                stats["checkpoints"],
+                ", ".join(str(spec["email"]) for spec in DEMO_USERS),
+            )
+
+        if settings.AUTO_SEED_ADMIN:
             seed_admin(db)

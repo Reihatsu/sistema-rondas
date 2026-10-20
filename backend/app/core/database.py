@@ -1,13 +1,17 @@
-"""Conexión a la base de datos MySQL.
+"""Conexión a la base de datos (MySQL local o SQLite en Render).
 
 Responsabilidades:
 
-* Crear la base de datos si no existe (``CREATE DATABASE IF NOT EXISTS``).
+* Crear la base de datos MySQL si no existe (``CREATE DATABASE IF NOT EXISTS``);
+  en SQLite el archivo se crea automáticamente.
 * Exponer el ``engine``, la fábrica de sesiones y la dependencia ``get_db``
   utilizada por las rutas de FastAPI.
 
-La URL puede sobrescribirse con la variable de entorno ``DATABASE_URL``
-(útil para pruebas con SQLite o para despliegues gestionados).
+La URL se resuelve en ``app.core.config``:
+
+* ``DATABASE_URL`` si está definida (máxima prioridad).
+* SQLite si ``USE_SQLITE=true`` o si no hay variables de MySQL.
+* MySQL con PyMySQL en caso contrario.
 """
 
 from __future__ import annotations
@@ -15,11 +19,13 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Generator
+from pathlib import Path
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 
@@ -29,13 +35,46 @@ logger = logging.getLogger(__name__)
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
 
 
+def _sqlite_engine(url: str) -> Engine:
+    """Crea el engine de SQLite con las opciones que requiere FastAPI.
+
+    ``check_same_thread=False`` permite reutilizar la conexión entre los hilos
+    del threadpool de FastAPI. Se usa ``StaticPool`` solo para bases en memoria
+    (pruebas), de modo que todas las sesiones compartan la misma base.
+    """
+    database = make_url(url).database
+    if database and database != ":memory:":
+        # Garantiza que el directorio del archivo exista (p. ej. volumen en Render).
+        Path(database).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+    engine_kwargs: dict[str, object] = {
+        "connect_args": {"check_same_thread": False},
+        "echo": settings.DB_ECHO,
+        "future": True,
+    }
+    if not database or database == ":memory:":
+        engine_kwargs["poolclass"] = StaticPool
+
+    engine = create_engine(url, **engine_kwargs)
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(  # type: ignore[no-untyped-def]
+        dbapi_connection, _record
+    ) -> None:
+        """Activa las claves foráneas (MySQL las aplica por defecto)."""
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+    return engine
+
+
 def _create_engine() -> Engine:
     """Crea el engine de SQLAlchemy con opciones adecuadas por motor."""
-    connect_args: dict[str, object] = {}
-    if settings.DATABASE_URL.startswith("sqlite"):
-        # SQLite en memoria/archivo requiere esto para usarse con FastAPI.
-        connect_args["check_same_thread"] = False
-        return create_engine(settings.DATABASE_URL, connect_args=connect_args)
+    if settings.is_sqlite:
+        return _sqlite_engine(settings.DATABASE_URL)
 
     return create_engine(
         settings.DATABASE_URL,
@@ -49,6 +88,21 @@ def _create_engine() -> Engine:
 
 
 engine: Engine = _create_engine()
+
+if settings.is_sqlite:
+    logger.info(
+        "Base de datos SQLite en uso (%s%s).",
+        engine.url.database,
+        " - fallback sin configuración MySQL" if settings.IS_SQLITE_FALLBACK else "",
+    )
+else:
+    logger.info(
+        "Base de datos MySQL en uso (%s:%s/%s).",
+        settings.DB_HOST,
+        settings.DB_PORT,
+        settings.DB_NAME,
+    )
+
 
 #: Fábrica de sesiones. ``expire_on_commit=False`` permite devolver objetos
 #: recién creados sin provocar un SELECT extra al serializar la respuesta.
