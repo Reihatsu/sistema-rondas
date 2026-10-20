@@ -99,6 +99,56 @@ export async function startRound(roundId: number): Promise<RoundDetail> {
   return data;
 }
 
+export interface ListRoundHistoryParams {
+  page?: number;
+  page_size?: number;
+  /** Si se omite, el backend devuelve pausadas, completadas y canceladas. */
+  status?: RoundStatus;
+  date_from?: string;
+  date_to?: string;
+}
+
+/** `GET /rounds/history`: rondas pasadas con sus marcaciones. */
+export async function listRoundHistory(
+  params: ListRoundHistoryParams = {},
+): Promise<Paginated<RoundDetail>> {
+  const { data } = await api.get<Paginated<RoundDetail>>('/rounds/history', {
+    params,
+  });
+  return data;
+}
+
+/**
+ * `POST /rounds/{id}/pause`: pausa la ronda y congela el cronómetro.
+ * El comentario es obligatorio en el backend (`RoundPauseCreate`).
+ */
+export async function pauseRound(
+  roundId: number,
+  comment: string,
+): Promise<RoundDetail> {
+  const { data } = await api.post<RoundDetail>(`/rounds/${roundId}/pause`, {
+    comment,
+  });
+  return data;
+}
+
+/** `POST /rounds/{id}/resume`: reanuda una ronda pausada. */
+export async function resumeRound(roundId: number): Promise<RoundDetail> {
+  const { data } = await api.post<RoundDetail>(`/rounds/${roundId}/resume`);
+  return data;
+}
+
+/** `POST /rounds/{id}/cancel`: cancela la ronda con un motivo obligatorio. */
+export async function cancelRound(
+  roundId: number,
+  reason: string,
+): Promise<RoundDetail> {
+  const { data } = await api.post<RoundDetail>(`/rounds/${roundId}/cancel`, {
+    reason,
+  });
+  return data;
+}
+
 /** `POST /rounds/{id}/comments`: añade una nota operativa firmada. */
 export async function addRoundComment(
   roundId: number,
@@ -115,7 +165,11 @@ export const roundsApi = {
   logs: listRoundLogs,
   addComment: addRoundComment,
   active: getActiveRound,
+  history: listRoundHistory,
   checkpoints: listRoundCheckpoints,
   checkIn,
   start: startRound,
+  pause: pauseRound,
+  resume: resumeRound,
+  cancel: cancelRound,
 };

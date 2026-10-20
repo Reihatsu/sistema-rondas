@@ -126,6 +126,16 @@ class Settings:
         self.AUTO_SEED_ADMIN: bool = _as_bool(os.getenv("AUTO_SEED_ADMIN"), True)
         #: Siembra empresa/usuarios/puntos demo cuando la base de datos está vacía.
         self.AUTO_SEED_DEMO: bool = _as_bool(os.getenv("AUTO_SEED_DEMO"), True)
+
+        # --- Reglas de negocio de las rondas ---
+        #: Minutos sin marcaciones tras los cuales una ronda en curso se cancela.
+        self.ROUND_INACTIVITY_TIMEOUT_MINUTES: int = max(
+            1, _as_int(os.getenv("ROUND_INACTIVITY_TIMEOUT_MINUTES"), 20)
+        )
+        #: Distancia máxima por defecto de la geovalla de un checkpoint (metros).
+        self.DEFAULT_GEOFENCE_RADIUS_M: int = max(
+            10, _as_int(os.getenv("DEFAULT_GEOFENCE_RADIUS_M"), 50)
+        )
         self.FIRST_ADMIN_NAME: str = os.getenv("FIRST_ADMIN_NAME", "Administrador")
         self.FIRST_ADMIN_EMAIL: str = os.getenv(
             "FIRST_ADMIN_EMAIL", "admin@sistema-rondas.local"
@@ -172,6 +182,11 @@ class Settings:
             f"mysql+pymysql://{user}:{password}@{self.DB_HOST}:{self.DB_PORT}"
             f"/{self.DB_NAME}?charset=utf8mb4"
         )
+
+    @property
+    def ROUND_INACTIVITY_TIMEOUT_SECONDS(self) -> int:
+        """Ventana de inactividad en segundos (derivada de los minutos)."""
+        return self.ROUND_INACTIVITY_TIMEOUT_MINUTES * 60
 
     @property
     def server_url(self) -> str:

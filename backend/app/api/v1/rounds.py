@@ -1,18 +1,32 @@
-"""Endpoints de Rondas: consultas, comentarios y marcación QR con GPS."""
+"""Endpoints de Rondas: ciclo de vida, historial, comentarios y marcación QR.
+
+Cubre el flujo operativo completo del guardia:
+
+* Consulta de la ronda activa, de sus checkpoints y del historial.
+* Inicio, pausa (con motivo obligatorio), reanudación y cancelación.
+* Marcación por QR con validación GPS, tiempos por tramo y cierre automático
+  de la ronda al visitar el último checkpoint.
+* Cancelación automática cuando pasan más de
+  ``ROUND_INACTIVITY_TIMEOUT_MINUTES`` minutos sin actividad.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import CurrentUser, DbSession, user_company_ids
+from app.core.config import settings
 from app.core.geo import haversine_distance_m
+from app.core.timeutils import elapsed_seconds as compute_elapsed_seconds
+from app.core.timeutils import ensure_utc, utc_now
 from app.crud import checkpoint as crud_checkpoint
 from app.crud import round as crud_round
 from app.models import (
     Checkpoint,
     Round,
+    RoundCheckpointStatus,
     RoundLog,
     RoundLogStatus,
     RoundStatus,
@@ -21,12 +35,14 @@ from app.models import (
 )
 from app.schemas.common import Paginated
 from app.schemas.round import (
+    RoundCancelCreate,
     RoundCheckInCreate,
     RoundCheckInRead,
     RoundCheckpointRead,
     RoundCommentCreate,
     RoundDetail,
     RoundLogRead,
+    RoundPauseCreate,
     RoundRead,
     RoundStatusCount,
     RoundSummary,
@@ -42,6 +58,27 @@ STATUS_ORDER = [
     RoundStatus.COMPLETED,
     RoundStatus.CANCELLED,
 ]
+
+#: Estados que se listan por defecto en el historial del guardia.
+HISTORY_STATUSES = (
+    RoundStatus.PAUSED,
+    RoundStatus.COMPLETED,
+    RoundStatus.CANCELLED,
+)
+
+INACTIVITY_REASON = "Cancelada por inactividad"
+
+INACTIVITY_OBSERVATION = (
+    "Cancelación automática por inactividad: "
+    f"{settings.ROUND_INACTIVITY_TIMEOUT_MINUTES} minutos sin marcaciones."
+)
+
+INACTIVITY_CANCELLED_MESSAGE = (
+    "La ronda fue cancelada automáticamente por inactividad: transcurrieron "
+    f"más de {settings.ROUND_INACTIVITY_TIMEOUT_MINUTES} minutos sin marcaciones. "
+    "Inicie una nueva ronda para continuar."
+)
+
 
 
 def _scope(current_user: User) -> tuple[list[int] | None, int | None]:
@@ -94,11 +131,107 @@ def _get_round_or_404(db: DbSession, round_id: int, *, with_logs: bool = False) 
     return round_obj
 
 
+def _append_observation(
+    round_obj: Round,
+    author: str,
+    text: str,
+    moment: datetime | None = None,
+) -> None:
+    """Añade una entrada firmada al historial de observaciones de la ronda.
+
+    No existe una tabla de comentarios: se anexa al campo ``observations`` con
+    el autor y la fecha UTC para conservar la trazabilidad sin migraciones.
+    """
+    stamp = (ensure_utc(moment) or utc_now()).strftime("%d/%m/%Y %H:%M UTC")
+    entry = f"[{stamp}] {author}: {text.strip()}"
+    previous = (round_obj.observations or "").strip()
+    round_obj.observations = f"{previous}\n{entry}" if previous else entry
+
+
+def _close_pause(round_obj: Round, moment: datetime) -> None:
+    """Acumula la pausa abierta y limpia ``paused_at``.
+
+    Debe llamarse antes de reanudar o cancelar una ronda pausada para que el
+    cronómetro descuente también el último tramo en pausa.
+    """
+    paused_at = ensure_utc(round_obj.paused_at)
+    if paused_at is None:
+        round_obj.paused_at = None
+        return
+
+    span = max(0, int(((ensure_utc(moment) or utc_now()) - paused_at).total_seconds()))
+    round_obj.paused_seconds = (round_obj.paused_seconds or 0) + span
+    round_obj.paused_at = None
+
+
+def _expire_round_if_inactive(
+    db: DbSession,
+    round_obj: Round,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Cancela la ronda si superó la ventana de inactividad.
+
+    Solo aplica a rondas ``IN_PROGRESS``; las pausadas pueden retomarse desde
+    el historial sin límite de tiempo.
+
+    Returns:
+        ``True`` si la ronda acaba de cancelarse por inactividad.
+    """
+    if round_obj.status is not RoundStatus.IN_PROGRESS:
+        return False
+
+    deadline = round_obj.inactivity_deadline
+    moment = ensure_utc(now) or utc_now()
+    if deadline is None or moment <= deadline:
+        return False
+
+    round_obj.status = RoundStatus.CANCELLED
+    round_obj.end_time = moment
+    round_obj.paused_at = None
+    round_obj.cancel_reason = INACTIVITY_REASON
+    round_obj.last_activity_at = moment
+    _append_observation(round_obj, "Sistema", INACTIVITY_OBSERVATION, moment)
+
+    db.add(round_obj)
+    db.commit()
+    db.refresh(round_obj)
+    return True
+
+
+def _ensure_own_round(current_user: User, round_obj: Round, action: str) -> None:
+    """Restringe las acciones operativas al guardia asignado."""
+    if round_obj.guard_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Solo el guardia asignado puede {action}",
+        )
+
+
+def _ensure_open_round(round_obj: Round) -> None:
+    """Rechaza acciones sobre rondas ya cerradas."""
+    if round_obj.status in (RoundStatus.COMPLETED, RoundStatus.CANCELLED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La ronda ya está cerrada y no admite cambios.",
+        )
+
+
+def _round_detail(round_obj: Round) -> RoundDetail:
+    """Serializa una ronda con sus marcaciones y campos calculados."""
+    return RoundDetail.model_validate(round_obj)
+
+
+
 def _to_round_checkpoint(
     checkpoint: Checkpoint,
+    *,
     visited_at: datetime | None = None,
+    elapsed_seconds: int | None = None,
+    segment_seconds: int | None = None,
 ) -> RoundCheckpointRead:
     """Combina un punto de control con su estado de visita en la ronda."""
+    visited = visited_at is not None
     return RoundCheckpointRead(
         id=checkpoint.id,
         name=checkpoint.name,
@@ -107,8 +240,15 @@ def _to_round_checkpoint(
         latitude=checkpoint.latitude,
         longitude=checkpoint.longitude,
         geofence_radius_m=checkpoint.geofence_radius_m or 50,
-        is_visited=visited_at is not None,
+        status=(
+            RoundCheckpointStatus.COMPLETED
+            if visited
+            else RoundCheckpointStatus.PENDING
+        ),
+        is_visited=visited,
         visited_at=visited_at,
+        elapsed_seconds=elapsed_seconds,
+        segment_seconds=segment_seconds,
     )
 
 
@@ -209,7 +349,62 @@ def get_active_round(
     round_obj = crud_round.get_guard_active_round(db, current_user.id)
     if round_obj is None:
         return None
+
+    # Si superó la ventana de inactividad se cancela aquí y se devuelve la
+    # ronda ya cerrada para que la app muestre la alerta al guardia. En la
+    # siguiente consulta ``/active`` ya devolverá ``null``.
+    _expire_round_if_inactive(db, round_obj)
     return RoundDetail.model_validate(round_obj)
+
+
+@router.get(
+    "/history",
+    response_model=Paginated[RoundDetail],
+    summary="Historial de rondas del guardia",
+)
+def list_round_history(
+    db: DbSession,
+    current_user: CurrentUser,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    round_status: RoundStatus | None = Query(
+        None,
+        alias="status",
+        description=(
+            "Filtra por estado. Por defecto devuelve las rondas pausadas, "
+            "completadas y canceladas."
+        ),
+    ),
+    date_from: datetime | None = Query(None, description="Desde created_at"),
+    date_to: datetime | None = Query(None, description="Hasta created_at"),
+) -> Paginated[RoundDetail]:
+    """Rondas pasadas (y pausadas) con sus marcaciones para el historial móvil.
+
+    Las rondas pausadas se incluyen porque el guardia puede continuarlas desde
+    la pantalla de historial. El alcance por rol es el mismo que en el resto
+    del módulo; un guardia solo ve las suyas.
+    """
+    allowed_company_ids, restricted_guard_id = _scope(current_user)
+    statuses = (round_status,) if round_status else HISTORY_STATUSES
+
+    items, total = crud_round.list_rounds(
+        db,
+        page=page,
+        page_size=page_size,
+        statuses=statuses,
+        date_from=date_from,
+        date_to=date_to,
+        allowed_company_ids=allowed_company_ids,
+        restricted_to_guard_id=restricted_guard_id,
+        with_logs=True,
+    )
+
+    return Paginated[RoundDetail](
+        items=[RoundDetail.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get(
@@ -222,13 +417,12 @@ def get_round(
     db: DbSession,
     current_user: CurrentUser,
 ) -> RoundDetail:
-    """Devuelve la ronda junto a sus checkpoints NFC."""
-    round_obj = crud_round.get_round(db, round_id, with_logs=True)
-    if round_obj is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Ronda no encontrada"
-        )
+    """Devuelve la ronda junto a sus checkpoints NFC/QR."""
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
     _ensure_round_access(current_user, round_obj)
+
+    # Una ronda en curso que superó la inactividad se muestra ya cancelada.
+    _expire_round_if_inactive(db, round_obj)
     return RoundDetail.model_validate(round_obj)
 
 
@@ -247,24 +441,27 @@ def add_round_comment(
     """Añade una nota operativa firmada al historial de observaciones.
 
     No existe una tabla de comentarios: se anexa al campo ``observations``
-    con el autor y la fecha para conservar la trazabilidad sin migraciones.
+    con el autor y la fecha UTC para conservar la trazabilidad sin migraciones.
+    Un comentario cuenta como actividad y reinicia el plazo de inactividad.
     """
-    round_obj = crud_round.get_round(db, round_id, with_logs=True)
-    if round_obj is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Ronda no encontrada"
-        )
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
     _ensure_round_access(current_user, round_obj)
 
-    stamp = datetime.now().strftime("%d/%m/%Y %H:%M")
-    entry = f"[{stamp}] {current_user.name}: {payload.comment}"
-    previous = (round_obj.observations or "").strip()
-    round_obj.observations = f"{previous}\n{entry}" if previous else entry
+    if _expire_round_if_inactive(db, round_obj):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=INACTIVITY_CANCELLED_MESSAGE,
+        )
+
+    now = utc_now()
+    _append_observation(round_obj, current_user.name, payload.comment, now)
+    if round_obj.status is RoundStatus.IN_PROGRESS:
+        round_obj.last_activity_at = now
 
     db.add(round_obj)
     db.commit()
     db.refresh(round_obj)
-    return RoundDetail.model_validate(round_obj)
+    return _round_detail(round_obj)
 
 
 @router.get(
@@ -294,25 +491,56 @@ def list_round_checkpoints(
     db: DbSession,
     current_user: CurrentUser,
 ) -> list[RoundCheckpointRead]:
-    """Lista los puntos activos de la empresa con su estado de visita.
+    """Lista los puntos activos de la empresa con su estado y tiempos.
 
     Es el listado operativo del guardia (a diferencia de ``/checkpoints``, que
     es administrativo y no está disponible para el rol ``GUARD``).
+
+    Para cada punto visitado devuelve:
+
+    * ``elapsed_seconds``: segundos de ronda acumulados (sin pausas) al marcarlo.
+    * ``segment_seconds``: segundos desde la marcación anterior de la ronda.
     """
     round_obj = _get_round_or_404(db, round_id)
     _ensure_round_access(current_user, round_obj)
 
-    checkpoints = crud_checkpoint.list_active_by_company(db, round_obj.company_id)
-    # Primera marcación válida por punto: es la que se muestra en la lista.
-    visited_at: dict[int, datetime] = {}
-    for log in crud_round.list_logs(db, round_id):
-        if log.checkpoint_id is not None and log.checkpoint_id not in visited_at:
-            visited_at[log.checkpoint_id] = log.timestamp
+    if _expire_round_if_inactive(db, round_obj):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=INACTIVITY_CANCELLED_MESSAGE,
+        )
 
-    return [
-        _to_round_checkpoint(checkpoint, visited_at.get(checkpoint.id))
-        for checkpoint in checkpoints
-    ]
+    checkpoints = crud_checkpoint.list_active_by_company(db, round_obj.company_id)
+
+    # Primera marcación válida por punto: es la que se muestra en la lista.
+    visits: dict[int, tuple[datetime, int | None, int | None]] = {}
+    previous_elapsed = 0
+    for log in crud_round.list_logs(db, round_id):
+        if log.checkpoint_id is None or log.checkpoint_id in visits:
+            continue
+
+        log_elapsed = log.elapsed_seconds
+        segment: int | None = None
+        if log_elapsed is not None:
+            segment = max(0, log_elapsed - previous_elapsed)
+            previous_elapsed = log_elapsed
+
+        visits[log.checkpoint_id] = (log.timestamp, log_elapsed, segment)
+
+    result: list[RoundCheckpointRead] = []
+    for checkpoint in checkpoints:
+        visited_at, elapsed, segment = visits.get(
+            checkpoint.id, (None, None, None)
+        )
+        result.append(
+            _to_round_checkpoint(
+                checkpoint,
+                visited_at=visited_at,
+                elapsed_seconds=elapsed,
+                segment_seconds=segment,
+            )
+        )
+    return result
 
 
 @router.post(
@@ -339,6 +567,9 @@ def register_checkin(
     * El punto debe tener coordenadas configuradas y el dispositivo debe estar
       dentro del radio de la geovalla.
     * Un punto no puede marcarse dos veces en la misma ronda.
+    * Si supera la ventana de inactividad, la ronda se cancela y se devuelve
+      un 409 con el motivo para que la app muestre la alerta.
+    * Al marcar el último checkpoint pendiente, la ronda pasa a ``COMPLETED``.
     """
     round_obj = _get_round_or_404(db, round_id)
     _ensure_round_access(current_user, round_obj)
@@ -348,6 +579,13 @@ def register_checkin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Solo el guardia asignado puede registrar marcaciones",
         )
+
+    if _expire_round_if_inactive(db, round_obj):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=INACTIVITY_CANCELLED_MESSAGE,
+        )
+
     if round_obj.status is RoundStatus.PAUSED:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -412,10 +650,22 @@ def register_checkin(
             detail=f"Ya registró el punto «{checkpoint.name}» en esta ronda.",
         )
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     if round_obj.status is RoundStatus.PENDING:
         round_obj.status = RoundStatus.IN_PROGRESS
         round_obj.start_time = round_obj.start_time or now
+
+    previous_logs = crud_round.list_logs(db, round_id)
+    previous_elapsed = max(
+        (item.elapsed_seconds or 0 for item in previous_logs),
+        default=0,
+    )
+    round_elapsed = compute_elapsed_seconds(
+        round_obj.start_time,
+        now,
+        round_obj.paused_seconds or 0,
+    )
+    segment = max(0, round_elapsed - previous_elapsed)
 
     log = RoundLog(
         round_id=round_obj.id,
@@ -425,22 +675,70 @@ def register_checkin(
         latitude=payload.latitude,
         longitude=payload.longitude,
         distance_m=round(distance, 1),
+        elapsed_seconds=round_elapsed,
         timestamp=now,
         status=RoundLogStatus.OK,
     )
+
+    round_obj.last_activity_at = now
+
+    active_checkpoints = crud_checkpoint.list_active_by_company(
+        db, round_obj.company_id
+    )
+    visited_ids = {
+        item.checkpoint_id for item in previous_logs if item.checkpoint_id is not None
+    }
+    visited_ids.add(checkpoint.id)
+    visited_active_ids = {
+        item.id for item in active_checkpoints if item.id in visited_ids
+    }
+    round_completed = bool(active_checkpoints) and len(visited_active_ids) >= len(
+        active_checkpoints
+    )
+
+    if round_completed:
+        round_obj.status = RoundStatus.COMPLETED
+        round_obj.end_time = now
+        round_obj.paused_at = None
+        _append_observation(
+            round_obj,
+            "Sistema",
+            (
+                "Ronda completada automáticamente: todos los checkpoints "
+                "fueron marcados."
+            ),
+            now,
+        )
+
     db.add(round_obj)
     db.add(log)
     db.commit()
     db.refresh(log)
+    db.refresh(round_obj)
+
+    message = (
+        f"Checkpoint «{checkpoint.name}» registrado correctamente "
+        f"a {distance:.0f} m del punto."
+    )
+    if round_completed:
+        message += " ¡Ronda completada! Todos los puntos fueron visitados."
 
     return RoundCheckInRead(
-        message=(
-            f"Checkpoint «{checkpoint.name}» registrado correctamente "
-            f"a {distance:.0f} m del punto."
-        ),
+        message=message,
         distance_m=round(distance, 1),
-        checkpoint=_to_round_checkpoint(checkpoint, now),
+        checkpoint=_to_round_checkpoint(
+            checkpoint,
+            visited_at=now,
+            elapsed_seconds=round_elapsed,
+            segment_seconds=segment,
+        ),
         log=RoundLogRead.model_validate(log),
+        round_status=round_obj.status,
+        round_completed=round_completed,
+        remaining_checkpoints=max(
+            0, len(active_checkpoints) - len(visited_active_ids)
+        ),
+        round_elapsed_seconds=round_elapsed,
     )
 
 
@@ -454,29 +752,192 @@ def start_round(
     db: DbSession,
     current_user: CurrentUser,
 ) -> RoundDetail:
-    """Pone en marcha una ronda pendiente del guardia autenticado."""
-    round_obj = _get_round_or_404(db, round_id)
-    if round_obj.guard_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo el guardia asignado puede iniciar esta ronda",
-        )
-    if round_obj.status in (RoundStatus.COMPLETED, RoundStatus.CANCELLED):
+    """Pone en marcha una ronda pendiente del guardia autenticado.
+
+    Es idempotente sobre una ronda ya en curso (solo actualiza la actividad).
+    Para retomar una ronda pausada debe usarse ``POST /rounds/{id}/resume``.
+    """
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
+    _ensure_own_round(current_user, round_obj, "iniciar esta ronda")
+    _ensure_open_round(round_obj)
+
+    # Una ronda en curso que ya caducó no puede "revivir" al llamar a start.
+    if _expire_round_if_inactive(db, round_obj):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="La ronda ya está cerrada y no se puede iniciar.",
+            detail=INACTIVITY_CANCELLED_MESSAGE,
         )
 
-    if round_obj.status is not RoundStatus.IN_PROGRESS:
-        round_obj.status = RoundStatus.IN_PROGRESS
-        round_obj.start_time = round_obj.start_time or datetime.now(timezone.utc)
-        round_obj.end_time = None
-        db.add(round_obj)
-        db.commit()
-
-    refreshed = crud_round.get_round(db, round_id, with_logs=True)
-    if refreshed is None:  # pragma: no cover - la ronda se acaba de confirmar
+    if round_obj.status is RoundStatus.PAUSED:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Ronda no encontrada"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "La ronda está pausada. Use «Reanudar ronda» para continuar "
+                "el cronómetro donde lo dejó."
+            ),
         )
-    return RoundDetail.model_validate(refreshed)
+
+    now = utc_now()
+    if round_obj.status is RoundStatus.PENDING or round_obj.start_time is None:
+        round_obj.status = RoundStatus.IN_PROGRESS
+        round_obj.start_time = now
+        round_obj.end_time = None
+        round_obj.paused_at = None
+        round_obj.paused_seconds = 0
+        round_obj.cancel_reason = None
+        round_obj.last_activity_at = now
+        _append_observation(round_obj, current_user.name, "Ronda iniciada.", now)
+    else:
+        round_obj.last_activity_at = now
+
+    db.add(round_obj)
+    db.commit()
+
+    refreshed = _get_round_or_404(db, round_id, with_logs=True)
+    return _round_detail(refreshed)
+
+
+@router.post(
+    "/{round_id}/pause",
+    response_model=RoundDetail,
+    summary="Pausar una ronda con un motivo obligatorio",
+)
+def pause_round(
+    round_id: int,
+    payload: RoundPauseCreate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> RoundDetail:
+    """Pausa la ronda y congela el cronómetro.
+
+    El motivo es obligatorio y queda firmado en las observaciones de la ronda
+    (por ejemplo: «Pausado por emergencia»). Una ronda pausada no caduca por
+    inactividad y puede retomarse desde el historial.
+    """
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
+    _ensure_round_access(current_user, round_obj)
+    _ensure_own_round(current_user, round_obj, "pausar esta ronda")
+    _ensure_open_round(round_obj)
+
+    if _expire_round_if_inactive(db, round_obj):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=INACTIVITY_CANCELLED_MESSAGE,
+        )
+
+    if round_obj.status is RoundStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Inicie la ronda antes de pausarla.",
+        )
+    if round_obj.status is RoundStatus.PAUSED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La ronda ya está pausada.",
+        )
+
+    now = utc_now()
+    round_obj.status = RoundStatus.PAUSED
+    round_obj.paused_at = now
+    round_obj.last_activity_at = now
+    _append_observation(
+        round_obj,
+        current_user.name,
+        f"Ronda pausada: {payload.comment}",
+        now,
+    )
+
+    db.add(round_obj)
+    db.commit()
+
+    refreshed = _get_round_or_404(db, round_id, with_logs=True)
+    return _round_detail(refreshed)
+
+
+@router.post(
+    "/{round_id}/resume",
+    response_model=RoundDetail,
+    summary="Reanudar una ronda pausada",
+)
+def resume_round(
+    round_id: int,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> RoundDetail:
+    """Retoma una ronda pausada y descuenta el tiempo en pausa.
+
+    Los checkpoints ya marcados se conservan: el cliente los vuelve a cargar
+    con ``GET /rounds/{id}/checkpoints`` para mostrar el progreso previo.
+    """
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
+    _ensure_round_access(current_user, round_obj)
+    _ensure_own_round(current_user, round_obj, "reanudar esta ronda")
+    _ensure_open_round(round_obj)
+
+    if round_obj.status is not RoundStatus.PAUSED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La ronda no está pausada; no es necesario reanudarla.",
+        )
+
+    now = utc_now()
+    _close_pause(round_obj, now)
+    round_obj.status = RoundStatus.IN_PROGRESS
+    round_obj.last_activity_at = now
+    _append_observation(round_obj, current_user.name, "Ronda reanudada.", now)
+
+    db.add(round_obj)
+    db.commit()
+
+    refreshed = _get_round_or_404(db, round_id, with_logs=True)
+    return _round_detail(refreshed)
+
+
+@router.post(
+    "/{round_id}/cancel",
+    response_model=RoundDetail,
+    summary="Cancelar una ronda con un motivo obligatorio",
+)
+def cancel_round(
+    round_id: int,
+    payload: RoundCancelCreate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> RoundDetail:
+    """Aborta la ronda y conserva el motivo en el historial.
+
+    Si la ronda estaba pausada, el tramo en pausa se descuenta del cronómetro
+    antes de cerrarla.
+    """
+    round_obj = _get_round_or_404(db, round_id, with_logs=True)
+    _ensure_round_access(current_user, round_obj)
+    _ensure_own_round(current_user, round_obj, "cancelar esta ronda")
+    _ensure_open_round(round_obj)
+
+    if _expire_round_if_inactive(db, round_obj):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=INACTIVITY_CANCELLED_MESSAGE,
+        )
+
+    now = utc_now()
+    if round_obj.status is RoundStatus.PAUSED:
+        _close_pause(round_obj, now)
+
+    round_obj.status = RoundStatus.CANCELLED
+    round_obj.end_time = now
+    round_obj.paused_at = None
+    round_obj.cancel_reason = payload.reason
+    round_obj.last_activity_at = now
+    _append_observation(
+        round_obj,
+        current_user.name,
+        f"Ronda cancelada: {payload.reason}",
+        now,
+    )
+
+    db.add(round_obj)
+    db.commit()
+
+    refreshed = _get_round_or_404(db, round_id, with_logs=True)
+    return _round_detail(refreshed)

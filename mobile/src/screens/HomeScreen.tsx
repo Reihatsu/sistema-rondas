@@ -14,7 +14,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, type Href } from 'expo-router';
 
 import type { UserRole } from '@/api/types';
 import { ThemedText } from '@/components/themed-text';
@@ -83,26 +83,52 @@ export default function HomeScreen() {
           </View>
 
           {isGuard ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Abrir mis checkpoints"
-              onPress={() => {
-                router.push('/rondas');
-              }}
-              style={({ pressed }) => [
-                styles.primaryAction,
-                { opacity: pressed ? 0.85 : 1 },
-              ]}>
-              <View style={styles.primaryActionBody}>
-                <ThemedText type="smallBold" style={styles.primaryActionTitle}>
-                  Mis checkpoints
-                </ThemedText>
-                <ThemedText type="small" style={styles.primaryActionSubtitle}>
-                  Consulte sus puntos asignados y registre la marcación con QR.
-                </ThemedText>
-              </View>
-              <ThemedText style={styles.primaryActionArrow}>›</ThemedText>
-            </Pressable>
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Abrir mi ronda activa"
+                onPress={() => {
+                  router.push('/rondas');
+                }}
+                style={({ pressed }) => [
+                  styles.primaryAction,
+                  { opacity: pressed ? 0.85 : 1 },
+                ]}>
+                <View style={styles.primaryActionBody}>
+                  <ThemedText type="smallBold" style={styles.primaryActionTitle}>
+                    Mi ronda activa
+                  </ThemedText>
+                  <ThemedText type="small" style={styles.primaryActionSubtitle}>
+                    Consulte el cronómetro, pause o reanude la ronda y registre sus
+                    checkpoints con QR.
+                  </ThemedText>
+                </View>
+                <ThemedText style={styles.primaryActionArrow}>›</ThemedText>
+              </Pressable>
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Abrir el historial de rondas"
+                onPress={() => {
+                  router.push('/historial' as Href);
+                }}
+                style={({ pressed }) => [
+                  styles.secondaryAction,
+                  {
+                    borderColor: theme.backgroundSelected,
+                    opacity: pressed ? 0.85 : 1,
+                  },
+                ]}>
+                <View style={styles.primaryActionBody}>
+                  <ThemedText type="smallBold">Historial de rondas</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Revise sus rondas completadas o canceladas y continúe una ronda
+                    pausada donde la dejó.
+                  </ThemedText>
+                </View>
+                <ThemedText style={styles.secondaryActionArrow}>›</ThemedText>
+              </Pressable>
+            </>
           ) : null}
 
           <ThemedView type="backgroundElement" style={styles.card}>
@@ -209,6 +235,20 @@ const styles = StyleSheet.create({
   },
   primaryActionArrow: {
     color: '#FFFFFF',
+    fontSize: 28,
+    lineHeight: 32,
+  },
+  secondaryAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.three,
+  },
+  secondaryActionArrow: {
+    color: ACCENT,
     fontSize: 28,
     lineHeight: 32,
   },

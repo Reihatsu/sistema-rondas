@@ -34,6 +34,17 @@ class RoundLogStatus(str, enum.Enum):
     SKIPPED = "SKIPPED"
 
 
+class RoundCheckpointStatus(str, enum.Enum):
+    """Estado operativo de un checkpoint dentro de una ronda.
+
+    No se persiste: se calcula a partir de la existencia de una marcación para
+    el punto en la ronda.
+    """
+
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+
+
 def sa_enum(enum_class: type[enum.Enum], name: str) -> SAEnum:
     """Crea una columna ``Enum`` que persiste los *valores* del Enum.
 

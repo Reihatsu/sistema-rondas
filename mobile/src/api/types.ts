@@ -11,6 +11,9 @@ export type RoundStatus = 'PENDING' | 'IN_PROGRESS' | 'PAUSED' | 'COMPLETED' | '
 
 export type RoundLogStatus = 'OK' | 'INCIDENT' | 'SKIPPED';
 
+/** Estado operativo de un checkpoint dentro de una ronda. */
+export type RoundCheckpointStatus = 'PENDING' | 'COMPLETED';
+
 export interface CompanySummary {
   id: number;
   name: string;
@@ -79,6 +82,8 @@ export interface RoundLog {
   latitude: number | null;
   longitude: number | null;
   distance_m: number | null;
+  /** Segundos de ronda (sin pausas) transcurridos al marcar el punto. */
+  elapsed_seconds: number | null;
   timestamp: string;
   status: RoundLogStatus;
 }
@@ -91,8 +96,17 @@ export interface Round {
   status: RoundStatus;
   start_time: string | null;
   end_time: string | null;
+  paused_at: string | null;
+  /** Segundos acumulados en pausas ya cerradas. */
+  paused_seconds: number;
+  last_activity_at: string | null;
+  cancel_reason: string | null;
   observations: string | null;
   created_at: string;
+  /** Cronómetro efectivo (sin pausas) calculado por el backend. */
+  elapsed_seconds: number;
+  /** Límite de inactividad; `null` si la ronda no está en curso. */
+  inactivity_deadline: string | null;
   company: CompanySummary | null;
   guard: UserSummary | null;
 }
@@ -126,8 +140,13 @@ export interface RoundCheckpoint {
   longitude: number | null;
   /** Radio de la geovalla en metros. */
   geofence_radius_m: number;
+  status: RoundCheckpointStatus;
   is_visited: boolean;
   visited_at: string | null;
+  /** Segundos acumulados de ronda al visitar el punto (sin pausas). */
+  elapsed_seconds: number | null;
+  /** Segundos transcurridos desde la marcación anterior de la ronda. */
+  segment_seconds: number | null;
 }
 
 /** Payload de `POST /rounds/{id}/checkin` (`RoundCheckInCreate`). */
@@ -143,4 +162,9 @@ export interface CheckInResult {
   distance_m: number;
   checkpoint: RoundCheckpoint;
   log: RoundLog;
+  round_status: RoundStatus;
+  /** `true` cuando esta marcación completó todos los puntos de la ronda. */
+  round_completed: boolean;
+  remaining_checkpoints: number;
+  round_elapsed_seconds: number;
 }

@@ -62,39 +62,60 @@ VALUES
      40.414700, -3.709500, 50, 1);
 
 -- --- Rondas ----------------------------------------------------------------
+-- ``last_activity_at`` alimenta el plazo de inactividad de 20 minutos y
+-- ``paused_at``/``paused_seconds`` permiten reanudar el cronómetro.
 INSERT IGNORE INTO `rounds`
-    (`id`, `company_id`, `guard_id`, `status`, `start_time`, `end_time`, `observations`, `created_at`)
+    (`id`, `company_id`, `guard_id`, `status`, `start_time`, `end_time`,
+     `paused_at`, `paused_seconds`, `last_activity_at`, `cancel_reason`,
+     `observations`, `created_at`)
 VALUES
     (1, 1, 3, 'COMPLETED',
      DATE_SUB(NOW(), INTERVAL 2 HOUR), DATE_SUB(NOW(), INTERVAL 1 HOUR),
+     NULL, 0, DATE_SUB(NOW(), INTERVAL 1 HOUR), NULL,
      'Ronda sin incidencias.', DATE_SUB(NOW(), INTERVAL 2 HOUR)),
     (2, 1, 3, 'IN_PROGRESS',
      DATE_SUB(NOW(), INTERVAL 30 MINUTE), NULL,
-     NULL, DATE_SUB(NOW(), INTERVAL 30 MINUTE)),
+     NULL, 0, DATE_SUB(NOW(), INTERVAL 5 MINUTE), NULL,
+     'Ronda en curso: pendiente el resto de checkpoints.',
+     DATE_SUB(NOW(), INTERVAL 30 MINUTE)),
     (3, 2, 3, 'COMPLETED',
      DATE_SUB(NOW(), INTERVAL 1 DAY), DATE_SUB(NOW(), INTERVAL 23 HOUR),
+     NULL, 0, DATE_SUB(NOW(), INTERVAL 23 HOUR), NULL,
      'Se detectó una puerta de servicio abierta.', DATE_SUB(NOW(), INTERVAL 1 DAY)),
-    (4, 2, 5, 'PENDING', NULL, NULL, NULL, DATE_SUB(NOW(), INTERVAL 10 MINUTE)),
-    (5, 1, 5, 'CANCELLED', NULL, NULL,
-     'Ronda cancelada por el cliente.', DATE_SUB(NOW(), INTERVAL 2 DAY));
+    (4, 2, 5, 'PENDING', NULL, NULL,
+     NULL, 0, NULL, NULL, NULL, DATE_SUB(NOW(), INTERVAL 10 MINUTE)),
+    (5, 1, 5, 'CANCELLED',
+     DATE_SUB(NOW(), INTERVAL 2 DAY), DATE_SUB(NOW(), INTERVAL 2 DAY) + INTERVAL 5 MINUTE,
+     NULL, 0, DATE_SUB(NOW(), INTERVAL 2 DAY) + INTERVAL 5 MINUTE,
+     'Ronda cancelada por el cliente.',
+     'Ronda cancelada por el cliente.', DATE_SUB(NOW(), INTERVAL 2 DAY)),
+    (6, 1, 5, 'PAUSED',
+     DATE_SUB(NOW(), INTERVAL 45 MINUTE), NULL,
+     DATE_SUB(NOW(), INTERVAL 10 MINUTE), 0,
+     DATE_SUB(NOW(), INTERVAL 10 MINUTE), NULL,
+     'Ronda pausada por una emergencia; puede continuarse desde el historial.',
+     DATE_SUB(NOW(), INTERVAL 45 MINUTE));
 
--- --- Checkpoints NFC -------------------------------------------------------
+-- --- Checkpoints NFC/QR ----------------------------------------------------
 INSERT INTO `round_logs`
-    (`round_id`, `nfc_tag_id`, `checkpoint_name`, `timestamp`, `status`)
+    (`round_id`, `checkpoint_id`, `nfc_tag_id`, `checkpoint_name`,
+     `elapsed_seconds`, `timestamp`, `status`)
 VALUES
-    (1, 'NFC-0001', 'Entrada principal',
-     DATE_SUB(NOW(), INTERVAL 115 MINUTE), 'OK'),
-    (1, 'NFC-0002', 'Recepción',
-     DATE_SUB(NOW(), INTERVAL 95 MINUTE), 'OK'),
-    (1, 'NFC-0003', 'Almacén',
-     DATE_SUB(NOW(), INTERVAL 80 MINUTE), 'OK'),
-    (1, 'NFC-0004', 'Salida',
-     DATE_SUB(NOW(), INTERVAL 65 MINUTE), 'OK'),
-    (2, 'NFC-0001', 'Entrada principal',
-     DATE_SUB(NOW(), INTERVAL 25 MINUTE), 'OK'),
-    (3, 'NFC-0001', 'Entrada principal',
-     DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 5 MINUTE, 'OK'),
-    (3, 'NFC-0010', 'Patio trasero',
-     DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 25 MINUTE, 'INCIDENT'),
-    (3, 'NFC-0002', 'Recepción',
-     DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 40 MINUTE, 'OK');
+    (1, 1, 'QR-EMP1-PT01', 'Recepción',
+     300, DATE_SUB(NOW(), INTERVAL 115 MINUTE), 'OK'),
+    (1, 2, 'QR-EMP1-PT02', 'Estacionamiento Nivel -1',
+     900, DATE_SUB(NOW(), INTERVAL 105 MINUTE), 'OK'),
+    (1, 3, 'QR-EMP1-PT03', 'Bodega Principal',
+     1500, DATE_SUB(NOW(), INTERVAL 95 MINUTE), 'OK'),
+    (2, 1, 'QR-EMP1-PT01', 'Recepción',
+     240, DATE_SUB(NOW(), INTERVAL 25 MINUTE), 'OK'),
+    (3, NULL, 'NFC-0001', 'Entrada principal',
+     300, DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 5 MINUTE, 'OK'),
+    (3, NULL, 'NFC-0010', 'Patio trasero',
+     900, DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 25 MINUTE, 'INCIDENT'),
+    (3, NULL, 'NFC-0002', 'Recepción',
+     1500, DATE_SUB(NOW(), INTERVAL 1 DAY) + INTERVAL 40 MINUTE, 'OK'),
+    (6, 1, 'QR-EMP1-PT01', 'Recepción',
+     600, DATE_SUB(NOW(), INTERVAL 40 MINUTE), 'OK'),
+    (6, 2, 'QR-EMP1-PT02', 'Estacionamiento Nivel -1',
+     1200, DATE_SUB(NOW(), INTERVAL 20 MINUTE), 'OK');

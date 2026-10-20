@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -32,12 +33,20 @@ def list_rounds(
     company_id: int | None = None,
     guard_id: int | None = None,
     status: RoundStatus | None = None,
+    statuses: Sequence[RoundStatus] | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     allowed_company_ids: list[int] | None = None,
     restricted_to_guard_id: int | None = None,
+    with_logs: bool = False,
 ) -> tuple[list[Round], int]:
-    """Lista rondas paginadas aplicando filtros y alcance por rol."""
+    """Lista rondas paginadas aplicando filtros y alcance por rol.
+
+    Args:
+        status: Filtra por un único estado.
+        statuses: Filtra por varios estados (se ignora si ``status`` está dado).
+        with_logs: Carga las marcaciones para las respuestas ``RoundDetail``.
+    """
     filters = []
     if company_id is not None:
         filters.append(Round.company_id == company_id)
@@ -45,6 +54,8 @@ def list_rounds(
         filters.append(Round.guard_id == guard_id)
     if status is not None:
         filters.append(Round.status == status)
+    elif statuses:
+        filters.append(Round.status.in_(tuple(statuses)))
     if date_from is not None:
         filters.append(Round.created_at >= date_from)
     if date_to is not None:
@@ -54,11 +65,15 @@ def list_rounds(
     if restricted_to_guard_id is not None:
         filters.append(Round.guard_id == restricted_to_guard_id)
 
+    options: list = list(ROUND_LOAD_OPTIONS)
+    if with_logs:
+        options.append(selectinload(Round.logs))
+
     base = select(Round).where(*filters)
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     items = list(
         db.scalars(
-            base.options(*ROUND_LOAD_OPTIONS)
+            base.options(*options)
             .order_by(Round.created_at.desc(), Round.id.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)

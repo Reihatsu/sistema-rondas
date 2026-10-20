@@ -18,7 +18,7 @@ sistema-rondas/
 │   │   ├── schemas/       # esquemas Pydantic
 │   │   ├── db/            # sesión, init_db, seed del admin
 │   │   └── main.py
-│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints, 0003_checkin_gps)
+│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints, 0003_checkin_gps, 0004_round_lifecycle)
 │   ├── init_db.py         # crea tablas + datos demo (contraseñas bcrypt)
 │   ├── main.py            # entrypoint uvicorn
 │   └── requirements.txt
@@ -28,8 +28,8 @@ sistema-rondas/
 ├── mobile/
 │   ├── src/
 │   │   ├── api/           # Axios + JWT + endpoints tipados
-│   │   ├── app/           # Rutas de Expo Router ((app)/rondas, (app)/scan)
-│   │   ├── screens/       # Login, Home, Rondas y QRScanner
+│   │   ├── app/           # Rutas de Expo Router ((app)/rondas, (app)/scan, (app)/historial)
+│   │   ├── screens/       # Login, Home, Rondas, Historial y QRScanner
 │   │   └── services/      # Sesión (AsyncStorage) y GPS (expo-location)
 │   └── app.json           # Plugins de cámara y ubicación
 └── frontend/
@@ -120,6 +120,8 @@ Variables relevantes de `.env`:
 | `BACKEND_CORS_ORIGINS` | Orígenes permitidos (Vite en 5173) |
 | `INIT_DB_ON_STARTUP`, `AUTO_SEED_ADMIN` | Bootstrap de tablas y admin |
 | `AUTO_SEED_DEMO` | Siembra datos demo cuando la base de datos está vacía |
+| `ROUND_INACTIVITY_TIMEOUT_MINUTES` | Minutos sin marcaciones antes de cancelar la ronda (20 por defecto) |
+| `DEFAULT_GEOFENCE_RADIUS_M` | Radio por defecto de la geovalla de un checkpoint (50 m) |
 
 ### Despliegue en Render (SQLite, plan gratuito)
 
@@ -229,11 +231,27 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 - `GET|PUT /api/v1/users/{id}/companies`
 - `GET|POST|DELETE /api/v1/users/{supervisor_id}/guards[/{guard_id}]`
 - `GET|POST /api/v1/checkpoints`, `GET|PUT|DELETE /api/v1/checkpoints/{id}`
-- `GET /api/v1/rounds`, `GET /api/v1/rounds/summary`, `GET /api/v1/rounds/{id}`,
-  `GET /api/v1/rounds/{id}/logs`, `POST /api/v1/rounds/{id}/comments`
+- `GET /api/v1/rounds`, `GET /api/v1/rounds/summary`, `GET /api/v1/rounds/history`,
+  `GET /api/v1/rounds/{id}`, `GET /api/v1/rounds/{id}/logs`,
+  `POST /api/v1/rounds/{id}/comments`
 - `GET /api/v1/rounds/active` (solo `GUARD`), `GET /api/v1/rounds/{id}/checkpoints`,
   `POST /api/v1/rounds/{id}/checkin`, `POST /api/v1/rounds/{id}/start`
+- `POST /api/v1/rounds/{id}/pause` (`{comment}` obligatorio),
+  `POST /api/v1/rounds/{id}/resume`, `POST /api/v1/rounds/{id}/cancel`
+  (`{reason}` obligatorio)
 - `GET /health`
+
+### Ciclo de vida de las rondas
+
+- El cronómetro se calcula en el servidor: `elapsed_seconds` descuenta
+  `paused_seconds` y se congela en pausas y cierres.
+- Al marcar el último checkpoint, la ronda pasa automáticamente a `COMPLETED`.
+- Si pasan `ROUND_INACTIVITY_TIMEOUT_MINUTES` (20 por defecto) sin marcaciones,
+  la ronda en curso se cancela (`cancel_reason = "Cancelada por inactividad"`) y
+  la API responde `409` con un mensaje explicativo. Las rondas pausadas no
+  caducan y pueden retomarse desde el historial.
+- `elapsed_seconds` de cada `RoundLog` y `segment_seconds` de cada checkpoint
+  permiten mostrar tiempos acumulados y por tramo en la app.
 
 ## 7. Validación rápida
 

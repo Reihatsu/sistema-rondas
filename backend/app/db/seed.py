@@ -122,32 +122,63 @@ SUPERVISOR_EMAIL = "supervisor@demo.com"
 GUARD_EMAILS = ("guardia1@demo.com", "guardia2@demo.com")
 COMPANY_USER_EMAIL = "cliente@demo.com"
 
-#: Rondas de demostración con sus checkpoints NFC.
-#: ``start_minutes_ago``/``end_minutes_ago`` son relativos al momento del seed.
+#: Rondas de demostración con sus checkpoints NFC/QR.
+#: ``*_minutes_ago`` son relativos al momento del seed y permiten que el
+#: cronómetro, las pausas y el historial tengan datos realistas en la app.
 DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
     {
         "guard": "guardia1@demo.com",
         "status": RoundStatus.IN_PROGRESS,
-        "start_minutes_ago": 10,
+        "start_minutes_ago": 8,
         "end_minutes_ago": None,
+        "paused_minutes_ago": None,
+        "paused_seconds": 0,
+        "last_activity_minutes_ago": 3,
+        "cancel_reason": None,
         "observations": (
-            "Ronda nocturna en curso: recorrido de los puntos de control "
-            "del perímetro. Permite probar el escaneo QR desde la app móvil."
+            "Ronda en curso: recorrido de los puntos de control del perímetro. "
+            "Permite probar el cronómetro, el escaneo QR y las pausas."
         ),
-        "logs": (),
+        "logs": (
+            {
+                "code": "QR-EMP1-PT01",
+                "name": "Recepción",
+                "minutes_ago": 6,
+                "elapsed_seconds": 120,
+            },
+        ),
     },
     {
         "guard": "guardia1@demo.com",
         "status": RoundStatus.COMPLETED,
         "start_minutes_ago": 180,
-        "end_minutes_ago": 120,
+        "end_minutes_ago": 150,
+        "paused_minutes_ago": None,
+        "paused_seconds": 300,
+        "last_activity_minutes_ago": 150,
+        "cancel_reason": None,
         "observations": (
             "Ronda completada sin incidencias; todos los checkpoints fueron leídos."
         ),
         "logs": (
-            ("NFC-0001", "Entrada principal", 175, RoundLogStatus.OK),
-            ("NFC-0002", "Recepción", 155, RoundLogStatus.OK),
-            ("NFC-0003", "Almacén", 135, RoundLogStatus.OK),
+            {
+                "code": "QR-EMP1-PT01",
+                "name": "Recepción",
+                "minutes_ago": 174,
+                "elapsed_seconds": 300,
+            },
+            {
+                "code": "QR-EMP1-PT02",
+                "name": "Estacionamiento Nivel -1",
+                "minutes_ago": 166,
+                "elapsed_seconds": 780,
+            },
+            {
+                "code": "QR-EMP1-PT03",
+                "name": "Bodega Principal",
+                "minutes_ago": 156,
+                "elapsed_seconds": 1400,
+            },
         ),
     },
     {
@@ -155,19 +186,37 @@ DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
         "status": RoundStatus.PAUSED,
         "start_minutes_ago": 60,
         "end_minutes_ago": None,
+        "paused_minutes_ago": 15,
+        "paused_seconds": 600,
+        "last_activity_minutes_ago": 15,
+        "cancel_reason": None,
         "observations": (
             "Ronda pausada por una alerta en el sector B; pendiente de reanudar."
         ),
         "logs": (
-            ("NFC-0001", "Entrada principal", 55, RoundLogStatus.OK),
-            ("NFC-0010", "Patio trasero", 40, RoundLogStatus.INCIDENT),
+            {
+                "code": "QR-EMP1-PT01",
+                "name": "Recepción",
+                "minutes_ago": 55,
+                "elapsed_seconds": 240,
+            },
+            {
+                "code": "QR-EMP1-PT02",
+                "name": "Estacionamiento Nivel -1",
+                "minutes_ago": 32,
+                "elapsed_seconds": 1500,
+            },
         ),
     },
     {
         "guard": "guardia1@demo.com",
         "status": RoundStatus.CANCELLED,
-        "start_minutes_ago": None,
-        "end_minutes_ago": None,
+        "start_minutes_ago": 300,
+        "end_minutes_ago": 285,
+        "paused_minutes_ago": None,
+        "paused_seconds": 0,
+        "last_activity_minutes_ago": 285,
+        "cancel_reason": "Mantenimiento programado en el edificio",
         "observations": (
             "Ronda cancelada por el cliente debido a un mantenimiento programado."
         ),
@@ -288,6 +337,17 @@ def _seed_rounds(
     rounds_created = 0
     logs_created = 0
 
+    # ``SessionLocal`` usa ``autoflush=False``: se confirman los IDs de los
+    # checkpoints recién sembrados antes de asociarlos a las marcaciones.
+    db.flush()
+
+    checkpoints_by_code = {
+        checkpoint.code: checkpoint
+        for checkpoint in db.scalars(
+            select(Checkpoint).where(Checkpoint.company_id == company.id)
+        )
+    }
+
     for spec in DEMO_ROUNDS:
         # Clave natural del seed: empresa + estado + observaciones.
         exists = db.scalar(
@@ -307,19 +367,32 @@ def _seed_rounds(
             status=spec["status"],
             start_time=_minutes_ago(now, spec["start_minutes_ago"]),
             end_time=_minutes_ago(now, spec["end_minutes_ago"]),
+            paused_at=_minutes_ago(now, spec.get("paused_minutes_ago")),
+            paused_seconds=int(spec.get("paused_seconds", 0)),
+            last_activity_at=_minutes_ago(
+                now, spec.get("last_activity_minutes_ago")
+            ),
+            cancel_reason=spec.get("cancel_reason"),
             observations=str(spec["observations"]),
         )
         db.add(round_obj)
         db.flush()  # necesitamos round_obj.id para los logs
 
-        for tag, checkpoint, minutes, status in spec["logs"]:
+        for log_spec in spec["logs"]:
+            code = str(log_spec["code"])
+            checkpoint = checkpoints_by_code.get(code)
             db.add(
                 RoundLog(
                     round_id=round_obj.id,
-                    nfc_tag_id=tag,
-                    checkpoint_name=checkpoint,
-                    timestamp=_minutes_ago(now, minutes),
-                    status=status,
+                    checkpoint_id=checkpoint.id if checkpoint is not None else None,
+                    nfc_tag_id=code,
+                    checkpoint_name=str(
+                        log_spec.get("name")
+                        or (checkpoint.name if checkpoint else code)
+                    ),
+                    timestamp=_minutes_ago(now, int(log_spec["minutes_ago"])),
+                    elapsed_seconds=log_spec.get("elapsed_seconds"),
+                    status=log_spec.get("status", RoundLogStatus.OK),
                 )
             )
             logs_created += 1

@@ -64,6 +64,11 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("round_logs", "latitude", "FLOAT NULL"),
     ("round_logs", "longitude", "FLOAT NULL"),
     ("round_logs", "distance_m", "FLOAT NULL"),
+    ("round_logs", "elapsed_seconds", "INTEGER NULL"),
+    ("rounds", "paused_at", "DATETIME NULL"),
+    ("rounds", "paused_seconds", "INTEGER NOT NULL DEFAULT 0"),
+    ("rounds", "last_activity_at", "DATETIME NULL"),
+    ("rounds", "cancel_reason", "VARCHAR(255) NULL"),
 )
 
 

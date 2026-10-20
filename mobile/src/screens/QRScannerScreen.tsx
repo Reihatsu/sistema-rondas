@@ -9,6 +9,7 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Platform,
   Pressable,
@@ -30,6 +31,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { getCurrentCoordinates, LocationError } from '@/services/location';
+import { formatClock } from '@/utils/datetime';
 
 const ACCENT = '#208AEF';
 const SUCCESS = '#1E7F4F';
@@ -86,6 +88,7 @@ export default function QRScannerScreen() {
   const [phase, setPhase] = useState<Phase>('scanning');
   const [result, setResult] = useState<CheckInResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isExpired, setIsExpired] = useState(false);
   const [canOpenSettings, setCanOpenSettings] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const busyRef = useRef(false);
@@ -115,6 +118,7 @@ export default function QRScannerScreen() {
   const resetScanner = useCallback(() => {
     setResult(null);
     setErrorMessage(null);
+    setIsExpired(false);
     setCanOpenSettings(false);
     setPhase('scanning');
   }, []);
@@ -155,8 +159,16 @@ export default function QRScannerScreen() {
           );
         }
 
-        setErrorMessage(getErrorMessage(scanError));
+        const message = getErrorMessage(scanError);
+        const expired = /inactividad/i.test(message);
+
+        setIsExpired(expired);
+        setErrorMessage(message);
         setPhase('error');
+
+        if (expired) {
+          Alert.alert('Ronda cancelada por inactividad', message);
+        }
       } finally {
         busyRef.current = false;
       }
@@ -345,33 +357,62 @@ export default function QRScannerScreen() {
       {phase === 'success' && result ? (
         <ResultOverlay
           variant="success"
-          title="Checkpoint registrado"
-          message={`${result.checkpoint.name} · a ${Math.round(result.distance_m)} m del punto.`}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Escanear otro checkpoint"
-            onPress={resetScanner}
-            style={styles.primaryButton}>
-            <ThemedText type="smallBold" style={styles.onAccent}>
-              Escanear otro
-            </ThemedText>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Volver a la ronda"
-            onPress={goBack}
-            style={styles.secondaryButtonDark}>
-            <ThemedText type="smallBold" style={styles.onAccent}>
-              Volver a la ronda
-            </ThemedText>
-          </Pressable>
+          title={result.round_completed ? '¡Ronda completada!' : 'Checkpoint registrado'}
+          message={[
+            `${result.checkpoint.name} · a ${Math.round(result.distance_m)} m del punto.`,
+            result.checkpoint.elapsed_seconds !== null
+              ? `Tiempo acumulado: ${formatClock(result.checkpoint.elapsed_seconds)}`
+              : null,
+            result.checkpoint.segment_seconds !== null
+              ? `Tramo desde la última marca: ${formatClock(result.checkpoint.segment_seconds)}`
+              : null,
+            result.round_completed
+              ? '¡Felicidades! Marcaste todos los checkpoints de la ronda.'
+              : `Quedan ${result.remaining_checkpoints} puntos pendientes.`,
+          ]
+            .filter(Boolean)
+            .join('\n')}>
+          {result.round_completed ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Volver a la ronda completada"
+              onPress={goBack}
+              style={styles.primaryButton}>
+              <ThemedText type="smallBold" style={styles.onAccent}>
+                Ver resumen de la ronda
+              </ThemedText>
+            </Pressable>
+          ) : (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Escanear otro checkpoint"
+                onPress={resetScanner}
+                style={styles.primaryButton}>
+                <ThemedText type="smallBold" style={styles.onAccent}>
+                  Escanear otro
+                </ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Volver a la ronda"
+                onPress={goBack}
+                style={styles.secondaryButtonDark}>
+                <ThemedText type="smallBold" style={styles.onAccent}>
+                  Volver a la ronda
+                </ThemedText>
+              </Pressable>
+            </>
+          )}
         </ResultOverlay>
       ) : null}
 
       {phase === 'error' && errorMessage ? (
         <ResultOverlay
           variant="error"
-          title="No se pudo registrar"
+          title={
+            isExpired ? 'Ronda cancelada por inactividad' : 'No se pudo registrar'
+          }
           message={errorMessage}>
           {canOpenSettings && Platform.OS !== 'web' ? (
             <Pressable
@@ -385,21 +426,23 @@ export default function QRScannerScreen() {
             </Pressable>
           ) : null}
 
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Reintentar el escaneo"
-            onPress={resetScanner}
-            style={styles.primaryButton}>
-            <ThemedText type="smallBold" style={styles.onAccent}>
-              Reintentar
-            </ThemedText>
-          </Pressable>
+          {isExpired ? null : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Reintentar el escaneo"
+              onPress={resetScanner}
+              style={styles.primaryButton}>
+              <ThemedText type="smallBold" style={styles.onAccent}>
+                Reintentar
+              </ThemedText>
+            </Pressable>
+          )}
 
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Volver a la ronda"
             onPress={goBack}
-            style={styles.secondaryButtonDark}>
+            style={isExpired ? styles.primaryButton : styles.secondaryButtonDark}>
             <ThemedText type="smallBold" style={styles.onAccent}>
               Volver a la ronda
             </ThemedText>

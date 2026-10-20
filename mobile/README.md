@@ -50,22 +50,24 @@ src/
 │   ├── types.ts    # Tipos alineados con los esquemas Pydantic del backend
 │   ├── auth.ts     # POST /auth/login, GET /auth/me
 │   ├── checkpoints.ts
-│   └── rounds.ts   # Rondas, ronda activa, checkpoints y check-in
+│   └── rounds.ts   # Rondas, ciclo de vida, historial y check-in
 ├── app/            # Rutas de Expo Router (solo archivos de ruta)
 │   ├── _layout.tsx # Providers: AuthProvider + ThemeProvider + AppNavigator
 │   ├── login.tsx   # Ruta pública /login
 │   └── (app)/      # Grupo protegido (requiere JWT)
 │       ├── _layout.tsx
 │       ├── index.tsx    # Inicio
-│       ├── rondas.tsx   # Checkpoints de la ronda activa
+│       ├── rondas.tsx   # Ronda activa: cronómetro, acciones y checkpoints
+│       ├── historial.tsx # Rondas pasadas y pausadas
 │       └── scan.tsx     # Escáner QR (modal)
-├── components/     # Componentes reutilizables (ThemedText, ThemedView, ...)
+├── components/     # ThemedText, ThemedView, RoundTimer, CommentPromptModal, ...
 ├── constants/      # Tema y espaciados
 ├── context/        # AuthContext (sesión JWT)
 ├── hooks/          # useTheme
 ├── navigation/     # AppNavigator (rutas protegidas)
-├── screens/        # Login, Home, Rondas y QRScanner
-└── services/       # storage.ts (sesión) y location.ts (GPS)
+├── screens/        # Login, Home, Rondas, Historial y QRScanner
+├── services/       # storage.ts (sesión) y location.ts (GPS)
+└── utils/          # datetime.ts (cronómetro y fechas)
 ```
 
 ## Autenticación
@@ -84,24 +86,48 @@ src/
 > almacenamiento seguro, migrar `src/services/storage.ts` a `expo-secure-store`
 > es el único cambio necesario.
 
-## Módulo operativo del guardia (QR + GPS)
+## Módulo operativo del guardia (ciclo de vida + QR + GPS)
 
-El rol `GUARD` ve en el inicio el acceso **Mis checkpoints**, que abre `/rondas`:
+El rol `GUARD` ve en el inicio dos accesos: **Mi ronda activa** (`/rondas`) y
+**Historial de rondas** (`/historial`).
 
-1. `GET /rounds/active` devuelve la ronda en curso (o pausada) del guardia. Si
-   no hay ninguna, la pantalla lista las rondas `PENDING` y permite iniciarlas
-   con `POST /rounds/{id}/start`.
-2. `GET /rounds/{id}/checkpoints` lista los puntos activos de la empresa con su
-   estado (`Pendiente` / `Visitado`).
-3. El botón **Escanear Checkpoint (QR)** abre `/scan`. La cámara lee el QR y la
+1. `GET /rounds/active` devuelve la ronda en curso o pausada del guardia. Si no
+   hay ninguna, la pantalla lista las rondas `PENDING` y permite iniciarlas con
+   `POST /rounds/{id}/start`.
+2. La pantalla activa muestra un cronómetro en tiempo real: parte del
+   `elapsed_seconds` del backend y avanza cada segundo en local. Se detiene al
+   pausar y se restaura desde el segundo guardado al reanudar.
+3. `GET /rounds/{id}/checkpoints` lista los puntos con estado
+   `PENDING`/`COMPLETED`, el tiempo acumulado (`elapsed_seconds`) y el tiempo del
+   tramo (`segment_seconds`).
+4. **Pausar** (`POST /rounds/{id}/pause`) exige un motivo obligatorio y lo guarda
+   firmado en las observaciones. **Reanudar** (`POST /rounds/{id}/resume`)
+   descuenta el tiempo en pausa y recarga los puntos ya leídos. **Cancelar**
+   (`POST /rounds/{id}/cancel`) exige un motivo. **Comentario** usa
+   `POST /rounds/{id}/comments`.
+5. El botón **Escanear Checkpoint (QR)** abre `/scan`. La cámara lee el QR y la
    app obtiene la ubicación con `expo-location` (`getCurrentPositionAsync`).
-4. `POST /rounds/{id}/checkin` recibe `{ qr_code, latitude, longitude }`. El
+6. `POST /rounds/{id}/checkin` recibe `{ qr_code, latitude, longitude }`. El
    backend valida que el código exista, pertenezca a la empresa, esté dentro de
    la geovalla del punto (`geofence_radius_m`, 50 m por defecto), no se haya
    marcado antes en la ronda y que la ronda esté operativa. La respuesta incluye
-   la distancia calculada y el registro creado.
-5. Al volver de `/scan`, `RondasScreen` se recarga (`useFocusEffect`) y el punto
-   aparece como visitado.
+   la distancia, el tiempo del tramo y si la ronda quedó completa.
+7. Al marcar el último punto, el backend cierra la ronda como `COMPLETED`; el
+   escáner y la pantalla activa felicitan al guardia y muestran el tiempo total.
+8. El historial (`GET /rounds/history`) lista pausadas, completadas y
+   canceladas. Las pausadas incluyen **Continuar ronda**, que llama a `resume` y
+   vuelve a `/rondas` con el cronómetro y el progreso restaurados.
+
+### Inactividad (20 minutos)
+
+- Si una ronda en curso supera `ROUND_INACTIVITY_TIMEOUT_MINUTES` (20 por
+  defecto) sin marcaciones, el backend la cancela automáticamente y responde
+  `409` con el motivo.
+- La app muestra una alerta **Ronda cancelada por inactividad**, el banner en la
+  pantalla activa y desactiva el escaneo. En el historial queda como `CANCELLED`
+  con `cancel_reason`.
+- Las rondas pausadas no caducan: pueden retomarse más tarde desde el historial.
+
 
 ### Permisos
 
