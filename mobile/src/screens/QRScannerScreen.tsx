@@ -6,7 +6,7 @@
  * los duplicados, y devuelve mensajes en español que se muestran al guardia.
  */
 
-import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -25,7 +25,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getErrorMessage } from '@/api/client';
-import { checkIn } from '@/api/rounds';
+import { checkIn, getActiveRound } from '@/api/rounds';
 import type { CheckInResult } from '@/api/types';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -80,8 +80,9 @@ function ResultOverlay({
 
 export default function QRScannerScreen() {
   const router = useRouter();
-  const { roundId: rawRoundId } = useLocalSearchParams<{
+  const { roundId: rawRoundId, from: rawFrom } = useLocalSearchParams<{
     roundId?: string | string[];
+    from?: string | string[];
   }>();
   const [permission, requestPermission] = useCameraPermissions();
 
@@ -91,20 +92,39 @@ export default function QRScannerScreen() {
   const [isExpired, setIsExpired] = useState(false);
   const [canOpenSettings, setCanOpenSettings] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
+  const [timerBase, setTimerBase] = useState<{
+    elapsed: number;
+    at: number;
+    running: boolean;
+  } | null>(null);
+  const [tick, setTick] = useState(() => Date.now());
   const busyRef = useRef(false);
 
   const roundIdText = Array.isArray(rawRoundId) ? rawRoundId[0] : rawRoundId;
+  const from = Array.isArray(rawFrom) ? rawFrom[0] : rawFrom;
   const roundId = Number(roundIdText);
   const hasValidRound = Number.isInteger(roundId) && roundId > 0;
 
   const goBack = useCallback(() => {
+    // Cuando la ronda se inició desde el Inicio, el escáner está encima de esa
+    // pantalla: se reemplaza por la vista activa para no volver al Inicio y
+    // dejar la ronda recién creada sin una pantalla de control. Se envía el id
+    // para que `/rondas` pueda mostrar el resumen si la ronda ya se completó.
+    if (from === 'home') {
+      router.replace({
+        pathname: '/rondas',
+        params: hasValidRound ? { roundId: String(roundId) } : {},
+      });
+      return;
+    }
+
     if (router.canGoBack()) {
       router.back();
       return;
     }
 
     router.replace('/rondas');
-  }, [router]);
+  }, [from, hasValidRound, roundId, router]);
 
   /** Abre los ajustes del sistema; en web no existen ajustes de app. */
   const openSettings = useCallback(() => {
@@ -122,6 +142,51 @@ export default function QRScannerScreen() {
     setCanOpenSettings(false);
     setPhase('scanning');
   }, []);
+
+  // Cronómetro del escáner: parte del tiempo que calcula el backend y avanza
+  // solo mientras la ronda está en curso.
+  useEffect(() => {
+    if (!hasValidRound) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void getActiveRound()
+      .then((active) => {
+        if (cancelled || !active || active.id !== roundId) {
+          return;
+        }
+
+        setTimerBase({
+          elapsed: active.elapsed_seconds,
+          at: Date.now(),
+          running: active.status === 'IN_PROGRESS',
+        });
+        setTick(Date.now());
+      })
+      .catch(() => {
+        // El escaneo sigue disponible aunque falle la consulta del cronómetro.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasValidRound, roundId]);
+
+  useEffect(() => {
+    if (!timerBase?.running) {
+      return;
+    }
+
+    const interval = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [timerBase]);
+
+  const liveElapsed = timerBase
+    ? timerBase.elapsed +
+      (timerBase.running ? Math.floor((tick - timerBase.at) / 1000) : 0)
+    : null;
 
   const handleBarcodeScanned = useCallback(
     async (scan: BarcodeScanningResult) => {
@@ -151,6 +216,12 @@ export default function QRScannerScreen() {
         });
 
         setResult(response);
+        setTimerBase({
+          elapsed: response.round_elapsed_seconds,
+          at: Date.now(),
+          running: response.round_status === 'IN_PROGRESS',
+        });
+        setTick(Date.now());
         setPhase('success');
       } catch (scanError) {
         if (scanError instanceof LocationError) {
@@ -167,6 +238,9 @@ export default function QRScannerScreen() {
         setPhase('error');
 
         if (expired) {
+          setTimerBase((current) =>
+            current ? { ...current, running: false } : current,
+          );
           Alert.alert('Ronda cancelada por inactividad', message);
         }
       } finally {
@@ -336,6 +410,17 @@ export default function QRScannerScreen() {
           </View>
 
           <View style={styles.bottomArea} pointerEvents="none">
+            {liveElapsed !== null ? (
+              <View style={styles.timerCard}>
+                <ThemedText type="code" style={styles.footerHint}>
+                  TIEMPO DE RONDA
+                </ThemedText>
+                <ThemedText type="subtitle" style={styles.onAccent}>
+                  {formatClock(liveElapsed)}
+                </ThemedText>
+              </View>
+            ) : null}
+
             {isBusy ? (
               <View style={styles.busyCard}>
                 <ActivityIndicator color="#FFFFFF" />
@@ -511,8 +596,16 @@ const styles = StyleSheet.create({
   },
   bottomArea: {
     alignItems: 'center',
+    gap: Spacing.two,
     paddingHorizontal: Spacing.four,
     paddingBottom: Spacing.four,
+  },
+  timerCard: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: Spacing.three,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
   },
   footerHint: {
     color: 'rgba(255, 255, 255, 0.75)',

@@ -52,12 +52,18 @@ const STATUS_COLORS: Record<RoundStatus, string> = {
 };
 
 type FilterValue = 'ALL' | 'PAUSED' | 'COMPLETED' | 'CANCELLED';
+type RangeValue = '24H' | 'ALL';
 
 const FILTERS: { value: FilterValue; label: string }[] = [
   { value: 'ALL', label: 'Todas' },
   { value: 'PAUSED', label: 'Pausadas' },
   { value: 'COMPLETED', label: 'Completadas' },
   { value: 'CANCELLED', label: 'Canceladas' },
+];
+
+const RANGES: { value: RangeValue; label: string }[] = [
+  { value: '24H', label: 'Últimas 24 h' },
+  { value: 'ALL', label: 'Todo' },
 ];
 
 function HistoryCard({
@@ -149,6 +155,7 @@ export default function RoundHistoryScreen() {
   const router = useRouter();
 
   const [filter, setFilter] = useState<FilterValue>('ALL');
+  const [range, setRange] = useState<RangeValue>('24H');
   const [rounds, setRounds] = useState<RoundDetail[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -160,12 +167,14 @@ export default function RoundHistoryScreen() {
 
   const hasLoadedRef = useRef(false);
   const previousFilterRef = useRef<FilterValue>('ALL');
+  const previousRangeRef = useRef<RangeValue>('24H');
 
   const load = useCallback(
     async (
       mode: 'initial' | 'refresh' | 'more',
       targetPage: number,
       activeFilter: FilterValue,
+      activeRange: RangeValue,
     ) => {
       if (mode === 'initial') {
         setIsLoading(true);
@@ -181,6 +190,10 @@ export default function RoundHistoryScreen() {
           page: targetPage,
           page_size: PAGE_SIZE,
           status: activeFilter === 'ALL' ? undefined : activeFilter,
+          // El backend calcula `date_from = now - 24 h` para la ventana por
+          // defecto; «Todo» desactiva el filtro temporal.
+          last_hours: activeRange === '24H' ? 24 : undefined,
+          all_time: activeRange === 'ALL' ? true : undefined,
         });
 
         setRounds((current) =>
@@ -202,15 +215,18 @@ export default function RoundHistoryScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      const filterChanged = previousFilterRef.current !== filter;
+      const queryChanged =
+        previousFilterRef.current !== filter || previousRangeRef.current !== range;
       previousFilterRef.current = filter;
+      previousRangeRef.current = range;
 
       void load(
-        filterChanged || !hasLoadedRef.current ? 'initial' : 'refresh',
+        queryChanged || !hasLoadedRef.current ? 'initial' : 'refresh',
         1,
         filter,
+        range,
       );
-    }, [filter, load]),
+    }, [filter, range, load]),
   );
 
   function goHome() {
@@ -279,7 +295,7 @@ export default function RoundHistoryScreen() {
           <RefreshControl
             refreshing={isRefreshing}
             onRefresh={() => {
-              void load('refresh', 1, filter);
+              void load('refresh', 1, filter, range);
             }}
             tintColor={ACCENT}
             colors={[ACCENT]}
@@ -289,8 +305,49 @@ export default function RoundHistoryScreen() {
           <View style={styles.header}>
             <ThemedText type="subtitle">Historial de rondas</ThemedText>
             <ThemedText type="small" themeColor="textSecondary">
-              Consulte sus rondas anteriores y continúe una ronda pausada con su
-              cronómetro y checkpoints ya marcados.
+              Por defecto se muestran las rondas de las últimas 24 horas.
+              Continúe una ronda pausada con su cronómetro y checkpoints ya
+              marcados.
+            </ThemedText>
+
+            <ThemedText type="code" themeColor="textSecondary">
+              PERIODO
+            </ThemedText>
+
+            <View style={styles.filters}>
+              {RANGES.map((item) => {
+                const selected = range === item.value;
+
+                return (
+                  <Pressable
+                    key={item.value}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Mostrar ${item.label}`}
+                    accessibilityState={{ selected }}
+                    onPress={() => setRange(item.value)}
+                    style={[
+                      styles.filterChip,
+                      {
+                        backgroundColor: selected
+                          ? ACCENT
+                          : theme.backgroundElement,
+                        borderColor: selected
+                          ? ACCENT
+                          : theme.backgroundSelected,
+                      },
+                    ]}>
+                    <ThemedText
+                      type="small"
+                      style={selected ? styles.onAccent : undefined}>
+                      {item.label}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <ThemedText type="code" themeColor="textSecondary">
+              ESTADO
             </ThemedText>
 
             <View style={styles.filters}>
@@ -339,12 +396,18 @@ export default function RoundHistoryScreen() {
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <ThemedText type="smallBold">
-              {error ? 'No se pudo cargar el historial' : 'Sin rondas todavía'}
+              {error
+                ? 'No se pudo cargar el historial'
+                : range === '24H'
+                  ? 'Sin rondas en las últimas 24 horas'
+                  : 'Sin rondas todavía'}
             </ThemedText>
             <ThemedText type="small" themeColor="textSecondary">
               {error
                 ? 'Revise su conexión y vuelva a intentarlo.'
-                : 'Cuando finalice o pause una ronda aparecerá en esta lista.'}
+                : range === '24H'
+                  ? 'Seleccione «Todo» para consultar rondas anteriores.'
+                  : 'Cuando finalice o pause una ronda aparecerá en esta lista.'}
             </ThemedText>
 
             {error ? (
@@ -352,7 +415,7 @@ export default function RoundHistoryScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Reintentar la carga del historial"
                 onPress={() => {
-                  void load('initial', 1, filter);
+                  void load('initial', 1, filter, range);
                 }}
                 style={({ pressed }) => [
                   styles.retryButton,
@@ -373,7 +436,7 @@ export default function RoundHistoryScreen() {
               accessibilityState={{ disabled: isLoadingMore, busy: isLoadingMore }}
               disabled={isLoadingMore}
               onPress={() => {
-                void load('more', page + 1, filter);
+                void load('more', page + 1, filter, range);
               }}
               style={({ pressed }) => [
                 styles.loadMoreButton,

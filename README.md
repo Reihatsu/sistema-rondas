@@ -231,10 +231,13 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 - `GET|PUT /api/v1/users/{id}/companies`
 - `GET|POST|DELETE /api/v1/users/{supervisor_id}/guards[/{guard_id}]`
 - `GET|POST /api/v1/checkpoints`, `GET|PUT|DELETE /api/v1/checkpoints/{id}`
-- `GET /api/v1/rounds`, `GET /api/v1/rounds/summary`, `GET /api/v1/rounds/history`,
+- `GET /api/v1/rounds`, `GET /api/v1/rounds/summary`, `GET /api/v1/rounds/history`
+  (últimas 24 h por defecto; `last_hours` y `all_time` ajustan la ventana),
   `GET /api/v1/rounds/{id}`, `GET /api/v1/rounds/{id}/logs`,
   `POST /api/v1/rounds/{id}/comments`
-- `GET /api/v1/rounds/active` (solo `GUARD`), `GET /api/v1/rounds/{id}/checkpoints`,
+- `GET /api/v1/rounds/active` (solo `GUARD`),
+  `POST /api/v1/rounds/start-new` (solo `GUARD`: crea e inicia la ronda con los
+  checkpoints activos de su empresa), `GET /api/v1/rounds/{id}/checkpoints`,
   `POST /api/v1/rounds/{id}/checkin`, `POST /api/v1/rounds/{id}/start`
 - `POST /api/v1/rounds/{id}/pause` (`{comment}` obligatorio),
   `POST /api/v1/rounds/{id}/resume`, `POST /api/v1/rounds/{id}/cancel`
@@ -243,8 +246,15 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 
 ### Ciclo de vida de las rondas
 
+- El guardia crea e inicia su ronda desde la app con
+  `POST /rounds/start-new`: la API la asigna a él y a su empresa activa, toma
+  los checkpoints activos de esa empresa y la deja en `IN_PROGRESS`. Si ya
+  tiene una ronda en curso o pausada responde `409` para evitar duplicados.
 - El cronómetro se calcula en el servidor: `elapsed_seconds` descuenta
   `paused_seconds` y se congela en pausas y cierres.
+- `GET /rounds/history` devuelve por defecto las rondas de las últimas 24 horas
+  (`date_from = now - 24 h`). Use `last_hours` para ampliar la ventana,
+  `date_from` para fijar un inicio exacto o `all_time=true` para ver todo.
 - Al marcar el último checkpoint, la ronda pasa automáticamente a `COMPLETED`.
 - Si pasan `ROUND_INACTIVITY_TIMEOUT_MINUTES` (20 por defecto) sin marcaciones,
   la ronda en curso se cancela (`cancel_reason = "Cancelada por inactividad"`) y

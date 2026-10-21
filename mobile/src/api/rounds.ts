@@ -99,13 +99,30 @@ export async function startRound(roundId: number): Promise<RoundDetail> {
   return data;
 }
 
+/**
+ * `POST /rounds/start-new`: crea e inicia una ronda nueva del guardia.
+ *
+ * El backend elige la empresa activa asignada con checkpoints operativos y
+ * devuelve la ronda ya en `IN_PROGRESS`. Si el guardia ya tiene una ronda
+ * abierta responde `409` con el identificador de esa ronda.
+ */
+export async function startNewRound(): Promise<RoundDetail> {
+  const { data } = await api.post<RoundDetail>('/rounds/start-new');
+  return data;
+}
+
 export interface ListRoundHistoryParams {
   page?: number;
   page_size?: number;
   /** Si se omite, el backend devuelve pausadas, completadas y canceladas. */
   status?: RoundStatus;
+  /** Fecha/hora ISO 8601 sobre `created_at`. */
   date_from?: string;
   date_to?: string;
+  /** Ventana en horas cuando no se envía `date_from` (24 por defecto). */
+  last_hours?: number;
+  /** Ignora la ventana temporal y devuelve todo el historial. */
+  all_time?: boolean;
 }
 
 /** `GET /rounds/history`: rondas pasadas con sus marcaciones. */
@@ -169,6 +186,7 @@ export const roundsApi = {
   checkpoints: listRoundCheckpoints,
   checkIn,
   start: startRound,
+  startNew: startNewRound,
   pause: pauseRound,
   resume: resumeRound,
   cancel: cancelRound,

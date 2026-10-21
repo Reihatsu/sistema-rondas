@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +17,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, type Href } from 'expo-router';
 
+import { getErrorMessage } from '@/api/client';
+import { getActiveRound, startNewRound } from '@/api/rounds';
 import type { UserRole } from '@/api/types';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -51,10 +54,77 @@ export default function HomeScreen() {
   const theme = useTheme();
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [isStartingRound, setIsStartingRound] = useState(false);
 
   const displayName = user?.name ?? 'Guardia';
   const firstName = displayName.split(' ')[0];
   const isGuard = user?.role === 'GUARD';
+
+  /**
+   * Crea una ronda nueva desde el servidor y abre directamente el escáner.
+   *
+   * Antes de crear se consulta la ronda activa: si existe, se evita el `409`
+   * del backend y se ofrece continuarla para no dejar una ronda huérfana.
+   */
+  async function handleStartNewRound() {
+    if (!isGuard || isStartingRound) {
+      return;
+    }
+
+    setIsStartingRound(true);
+
+    try {
+      const active = await getActiveRound();
+
+      if (active && active.status !== 'CANCELLED') {
+        const isPaused = active.status === 'PAUSED';
+
+        Alert.alert(
+          isPaused ? 'Tiene una ronda pausada' : 'Ya tiene una ronda en curso',
+          isPaused
+            ? 'Reanude su ronda pausada para continuar el cronómetro y los checkpoints ya marcados.'
+            : 'Continue la ronda actual antes de iniciar una nueva.',
+          [
+            { text: 'Cancelar', style: 'cancel' },
+            {
+              text: 'Ver mi ronda',
+              onPress: () => {
+                router.push('/rondas');
+              },
+            },
+          ],
+        );
+        return;
+      }
+
+      const created = await startNewRound();
+
+      router.push({
+        pathname: '/scan',
+        params: { roundId: String(created.id), from: 'home' },
+      });
+    } catch (startError) {
+      const message = getErrorMessage(startError);
+
+      // Carrera entre dos dispositivos: el backend rechaza la segunda ronda
+      // con 409 y se ofrece abrir la que ya está abierta.
+      if (/ya tiene una ronda/i.test(message)) {
+        Alert.alert('Ronda en curso', message, [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Ver mi ronda',
+            onPress: () => {
+              router.push('/rondas');
+            },
+          },
+        ]);
+      } else {
+        Alert.alert('No se pudo iniciar la ronda', message);
+      }
+    } finally {
+      setIsStartingRound(false);
+    }
+  }
 
   async function handleLogout() {
     setIsSigningOut(true);
@@ -86,24 +156,56 @@ export default function HomeScreen() {
             <>
               <Pressable
                 accessibilityRole="button"
+                accessibilityLabel="Iniciar una nueva ronda"
+                accessibilityState={{
+                  disabled: isStartingRound,
+                  busy: isStartingRound,
+                }}
+                disabled={isStartingRound}
+                onPress={() => {
+                  void handleStartNewRound();
+                }}
+                style={({ pressed }) => [
+                  styles.primaryAction,
+                  { opacity: isStartingRound ? 0.7 : pressed ? 0.85 : 1 },
+                ]}>
+                <View style={styles.primaryActionBody}>
+                  <ThemedText type="smallBold" style={styles.primaryActionTitle}>
+                    Iniciar Nueva Ronda
+                  </ThemedText>
+                  <ThemedText type="small" style={styles.primaryActionSubtitle}>
+                    Cree una ronda y comience a escanear los checkpoints activos
+                    de su empresa.
+                  </ThemedText>
+                </View>
+                {isStartingRound ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <ThemedText style={styles.primaryActionArrow}>›</ThemedText>
+                )}
+              </Pressable>
+
+              <Pressable
+                accessibilityRole="button"
                 accessibilityLabel="Abrir mi ronda activa"
                 onPress={() => {
                   router.push('/rondas');
                 }}
                 style={({ pressed }) => [
-                  styles.primaryAction,
-                  { opacity: pressed ? 0.85 : 1 },
+                  styles.secondaryAction,
+                  {
+                    borderColor: theme.backgroundSelected,
+                    opacity: pressed ? 0.85 : 1,
+                  },
                 ]}>
                 <View style={styles.primaryActionBody}>
-                  <ThemedText type="smallBold" style={styles.primaryActionTitle}>
-                    Mi ronda activa
-                  </ThemedText>
-                  <ThemedText type="small" style={styles.primaryActionSubtitle}>
-                    Consulte el cronómetro, pause o reanude la ronda y registre sus
-                    checkpoints con QR.
+                  <ThemedText type="smallBold">Mi ronda activa</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Consulte el cronómetro, pause o reanude la ronda y registre
+                    sus checkpoints con QR.
                   </ThemedText>
                 </View>
-                <ThemedText style={styles.primaryActionArrow}>›</ThemedText>
+                <ThemedText style={styles.secondaryActionArrow}>›</ThemedText>
               </Pressable>
 
               <Pressable

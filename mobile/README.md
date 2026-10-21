@@ -88,12 +88,16 @@ src/
 
 ## Módulo operativo del guardia (ciclo de vida + QR + GPS)
 
-El rol `GUARD` ve en el inicio dos accesos: **Mi ronda activa** (`/rondas`) y
-**Historial de rondas** (`/historial`).
+El rol `GUARD` ve en el inicio el botón destacado **Iniciar Nueva Ronda**, además
+de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
 
-1. `GET /rounds/active` devuelve la ronda en curso o pausada del guardia. Si no
-   hay ninguna, la pantalla lista las rondas `PENDING` y permite iniciarlas con
-   `POST /rounds/{id}/start`.
+1. **Iniciar Nueva Ronda** llama a `POST /rounds/start-new`. El backend crea la
+   ronda asignada al guardia y a su empresa activa, con los checkpoints activos
+   de esa empresa, y la deja en `IN_PROGRESS`. La app abre directamente `/scan`
+   para comenzar el recorrido. Si el guardia ya tiene una ronda en curso o
+   pausada, se le ofrece continuarla en lugar de crear otra.
+   `GET /rounds/active` sigue disponible para restaurar la ronda abierta al
+   entrar en `/rondas`.
 2. La pantalla activa muestra un cronómetro en tiempo real: parte del
    `elapsed_seconds` del backend y avanza cada segundo en local. Se detiene al
    pausar y se restaura desde el segundo guardado al reanudar.
@@ -106,7 +110,9 @@ El rol `GUARD` ve en el inicio dos accesos: **Mi ronda activa** (`/rondas`) y
    (`POST /rounds/{id}/cancel`) exige un motivo. **Comentario** usa
    `POST /rounds/{id}/comments`.
 5. El botón **Escanear Checkpoint (QR)** abre `/scan`. La cámara lee el QR y la
-   app obtiene la ubicación con `expo-location` (`getCurrentPositionAsync`).
+   app obtiene la ubicación con `expo-location` (`getCurrentPositionAsync`). El
+   escáner muestra el cronómetro de la ronda en tiempo real, alimentado por
+   `GET /rounds/active`.
 6. `POST /rounds/{id}/checkin` recibe `{ qr_code, latitude, longitude }`. El
    backend valida que el código exista, pertenezca a la empresa, esté dentro de
    la geovalla del punto (`geofence_radius_m`, 50 m por defecto), no se haya
@@ -114,9 +120,11 @@ El rol `GUARD` ve en el inicio dos accesos: **Mi ronda activa** (`/rondas`) y
    la distancia, el tiempo del tramo y si la ronda quedó completa.
 7. Al marcar el último punto, el backend cierra la ronda como `COMPLETED`; el
    escáner y la pantalla activa felicitan al guardia y muestran el tiempo total.
-8. El historial (`GET /rounds/history`) lista pausadas, completadas y
-   canceladas. Las pausadas incluyen **Continuar ronda**, que llama a `resume` y
-   vuelve a `/rondas` con el cronómetro y el progreso restaurados.
+8. El historial (`GET /rounds/history`) lista por defecto las rondas de las
+   **últimas 24 horas** (pausadas, completadas y canceladas); el filtro **Todo**
+   consulta el historial completo. Las pausadas incluyen **Continuar ronda**,
+   que llama a `resume` y vuelve a `/rondas` con el cronómetro y el progreso
+   restaurados.
 
 ### Inactividad (20 minutos)
 

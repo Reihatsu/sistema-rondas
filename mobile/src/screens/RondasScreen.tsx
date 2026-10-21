@@ -23,7 +23,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter, type Href } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from 'expo-router';
 
 import { getErrorMessage } from '@/api/client';
 import {
@@ -32,13 +32,11 @@ import {
   getActiveRound,
   getRound,
   listRoundCheckpoints,
-  listRounds,
   pauseRound,
   resumeRound,
-  startRound,
+  startNewRound,
 } from '@/api/rounds';
 import type {
-  Round,
   RoundCheckpoint,
   RoundDetail,
   RoundStatus,
@@ -215,9 +213,15 @@ function ActionButton({
 export default function RondasScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const { roundId: rawFinishedRoundId } = useLocalSearchParams<{
+    roundId?: string | string[];
+  }>();
+
+  const finishedRoundIdParam = Number(
+    Array.isArray(rawFinishedRoundId) ? rawFinishedRoundId[0] : rawFinishedRoundId,
+  );
 
   const [round, setRound] = useState<RoundDetail | null>(null);
-  const [pendingRound, setPendingRound] = useState<Round | null>(null);
   const [finishedRound, setFinishedRound] = useState<RoundDetail | null>(null);
   const [checkpoints, setCheckpoints] = useState<RoundCheckpoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -232,9 +236,14 @@ export default function RondasScreen() {
   const timerBaseRef = useRef<{ elapsed: number; at: number } | null>(null);
   const hasLoadedRef = useRef(false);
   const lastRoundIdRef = useRef<number | null>(null);
+  const requestedFinishedRoundIdRef = useRef<number | null>(
+    Number.isInteger(finishedRoundIdParam) && finishedRoundIdParam > 0
+      ? finishedRoundIdParam
+      : null,
+  );
   const expiredAlertRef = useRef<number | null>(null);
 
-  const syncTimer = useCallback((value: Round | null) => {
+  const syncTimer = useCallback((value: RoundDetail | null) => {
     timerBaseRef.current = value
       ? { elapsed: value.elapsed_seconds ?? 0, at: Date.now() }
       : null;
@@ -258,7 +267,6 @@ export default function RondasScreen() {
         if (active && active.status === 'CANCELLED') {
           setRound(null);
           setCheckpoints([]);
-          setPendingRound(null);
           setFinishedRound(null);
           lastRoundIdRef.current = null;
           syncTimer(null);
@@ -277,9 +285,12 @@ export default function RondasScreen() {
           syncTimer(null);
 
           // Si acabamos de cerrar una ronda, se muestra la pantalla de cierre
-          // (felicitación o motivo de cancelación) en lugar de un vacío.
-          const previousId = lastRoundIdRef.current;
+          // (felicitación o motivo de cancelación) en lugar de un vacío. El
+          // identificador puede venir del escáner abierto desde el Inicio.
+          const previousId =
+            lastRoundIdRef.current ?? requestedFinishedRoundIdRef.current;
           lastRoundIdRef.current = null;
+          requestedFinishedRoundIdRef.current = null;
 
           if (previousId !== null) {
             try {
@@ -298,14 +309,10 @@ export default function RondasScreen() {
             setFinishedRound(null);
           }
 
-          // Sin ronda en curso: se busca una pendiente para poder iniciarla.
-          const pending = await listRounds({ status: 'PENDING', page_size: 1 });
-          setPendingRound(pending.items[0] ?? null);
           return;
         }
 
         const items = await listRoundCheckpoints(active.id);
-        setPendingRound(null);
         setFinishedRound(null);
         setRound(active);
         syncTimer(active);
@@ -424,8 +431,8 @@ export default function RondasScreen() {
     }
   }
 
-  async function handleStartRound() {
-    if (!pendingRound || busyAction !== 'none') {
+  async function handleStartNewRound() {
+    if (busyAction !== 'none') {
       return;
     }
 
@@ -433,10 +440,36 @@ export default function RondasScreen() {
     setError(null);
 
     try {
-      await startRound(pendingRound.id);
-      await load('initial');
+      const created = await startNewRound();
+
+      // La ronda ya está en curso: se pinta de inmediato para que el
+      // cronómetro arranque aunque la consulta de checkpoints tarde.
+      setFinishedRound(null);
+      setRound(created);
+      syncTimer(created);
+      lastRoundIdRef.current = created.id;
+
+      try {
+        const items = await listRoundCheckpoints(created.id);
+        setCheckpoints(items);
+      } catch {
+        setCheckpoints([]);
+      }
+
+      router.push({
+        pathname: '/scan',
+        params: { roundId: String(created.id), from: 'rounds' },
+      });
     } catch (startError) {
-      setError(handleActionError(startError));
+      const message = getErrorMessage(startError);
+
+      // El backend rechaza la creación si el guardia ya tiene una ronda
+      // abierta: se recarga para mostrar esa ronda en lugar de un error.
+      if (/ronda/i.test(message) && /(en curso|pausada|#\d+)/i.test(message)) {
+        await load('refresh');
+      } else {
+        setError(handleActionError(startError));
+      }
     } finally {
       setBusyAction('none');
     }
@@ -743,42 +776,19 @@ export default function RondasScreen() {
             </View>
 
             <ActionButton
-              label="Ver historial de rondas"
-              variant="primary"
-              onPress={openHistory}
-            />
-            <ActionButton label="Volver al inicio" onPress={goHome} />
-          </ThemedView>
-        </View>
-      );
-    }
-
-    if (pendingRound) {
-      return (
-        <View style={styles.centered}>
-          <ThemedView type="backgroundElement" style={styles.stateCard}>
-            <ThemedText type="smallBold">Ronda pendiente de inicio</ThemedText>
-            <ThemedText type="small" themeColor="textSecondary">
-              Tiene una ronda asignada todavía no iniciada. Iníciela para ver sus
-              checkpoints y comenzar a escanear.
-            </ThemedText>
-
-            {error ? (
-              <ThemedText type="small" style={styles.dangerText}>
-                {error}
-              </ThemedText>
-            ) : null}
-
-            <ActionButton
-              label="Iniciar ronda"
+              label="Iniciar Nueva Ronda"
               variant="primary"
               onPress={() => {
-                void handleStartRound();
+                void handleStartNewRound();
               }}
               loading={busyAction === 'starting'}
               disabled={busyAction !== 'none'}
             />
-            <ActionButton label="Ver historial" onPress={openHistory} />
+            <ActionButton
+              label="Ver historial de rondas"
+              onPress={openHistory}
+            />
+            <ActionButton label="Volver al inicio" onPress={goHome} />
           </ThemedView>
         </View>
       );
@@ -789,8 +799,8 @@ export default function RondasScreen() {
         <ThemedView type="backgroundElement" style={styles.stateCard}>
           <ThemedText type="smallBold">Sin ronda activa</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            No tiene una ronda en curso. Consulte el historial para continuar una
-            ronda pausada o revise las rondas finalizadas.
+            Inicie una ronda nueva para comenzar el recorrido. El servidor
+            asignará automáticamente los checkpoints activos de su empresa.
           </ThemedText>
 
           {error ? (
@@ -802,10 +812,15 @@ export default function RondasScreen() {
           ) : null}
 
           <ActionButton
-            label="Ver historial de rondas"
+            label="Iniciar Nueva Ronda"
             variant="primary"
-            onPress={openHistory}
+            onPress={() => {
+              void handleStartNewRound();
+            }}
+            loading={busyAction === 'starting'}
+            disabled={busyAction !== 'none'}
           />
+          <ActionButton label="Ver historial de rondas" onPress={openHistory} />
           <ActionButton
             label="Actualizar"
             onPress={() => {

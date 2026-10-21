@@ -3,7 +3,9 @@
 Cubre el flujo operativo completo del guardia:
 
 * Consulta de la ronda activa, de sus checkpoints y del historial.
-* Inicio, pausa (con motivo obligatorio), reanudación y cancelación.
+* Creación e inicio directo de una ronda nueva por parte del guardia.
+* Inicio de rondas asignadas, pausa (con motivo obligatorio), reanudación y
+  cancelación.
 * Marcación por QR con validación GPS, tiempos por tramo y cierre automático
   de la ronda al visitar el último checkpoint.
 * Cancelación automática cuando pasan más de
@@ -12,7 +14,7 @@ Cubre el flujo operativo completo del guardia:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -65,6 +67,9 @@ HISTORY_STATUSES = (
     RoundStatus.COMPLETED,
     RoundStatus.CANCELLED,
 )
+
+#: Ventana por defecto del historial: últimas 24 horas.
+HISTORY_WINDOW_HOURS = 24
 
 INACTIVITY_REASON = "Cancelada por inactividad"
 
@@ -357,6 +362,117 @@ def get_active_round(
     return RoundDetail.model_validate(round_obj)
 
 
+@router.post(
+    "/start-new",
+    response_model=RoundDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear e iniciar una ronda nueva",
+)
+def start_new_round(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> RoundDetail:
+    """Crea una ronda en curso asignada al guardia autenticado.
+
+    El guardia ya no necesita una ronda ``PENDING`` previamente asignada: la
+    app móvil llama a este endpoint y recibe la ronda lista para escanear.
+
+    Reglas:
+
+    * Solo el rol ``GUARD`` puede crear su propia ronda.
+    * Si el guardia ya tiene una ronda ``IN_PROGRESS`` o ``PAUSED`` se responde
+      ``409`` con su identificador para que el cliente continúe esa ronda.
+      Una ronda en curso que superó la ventana de inactividad se cancela y no
+      bloquea la creación de la nueva.
+    * La empresa se toma de las empresas activas asignadas al guardia. Si
+      ninguna tiene checkpoints activos se responde ``400``.
+    * La ronda se crea directamente en ``IN_PROGRESS`` con el cronómetro
+      iniciado. Su recorrido son los checkpoints activos de la empresa, que se
+      consultan con ``GET /rounds/{id}/checkpoints``.
+    """
+    if current_user.role is not UserRole.GUARD:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo un guardia puede iniciar una ronda nueva",
+        )
+
+    active = crud_round.get_guard_active_round(db, current_user.id)
+
+    # Una ronda en curso que ya caducó se cierra y deja de bloquear el inicio.
+    if active is not None and _expire_round_if_inactive(db, active):
+        active = None
+
+    if active is not None:
+        state = (
+            "pausada"
+            if active.status is RoundStatus.PAUSED
+            else "en curso"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ya tiene una ronda {state} (#{active.id}). Continúe esa "
+                "ronda antes de iniciar otra."
+            ),
+        )
+
+    companies = [company for company in current_user.companies if company.is_active]
+    if not companies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No tiene una empresa activa asignada. Solicite al "
+                "administrador que le asigne una empresa."
+            ),
+        )
+
+    # Se elige la primera empresa activa que tenga puntos operativos.
+    company = None
+    checkpoints: list[Checkpoint] = []
+    for candidate in companies:
+        candidate_checkpoints = crud_checkpoint.list_active_by_company(
+            db, candidate.id
+        )
+        if candidate_checkpoints:
+            company = candidate
+            checkpoints = candidate_checkpoints
+            break
+
+    if company is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Ninguna de sus empresas tiene checkpoints activos. "
+                "Solicite al administrador que configure los puntos de control."
+            ),
+        )
+
+    now = utc_now()
+    round_obj = Round(
+        company_id=company.id,
+        guard_id=current_user.id,
+        status=RoundStatus.IN_PROGRESS,
+        start_time=now,
+        last_activity_at=now,
+        paused_seconds=0,
+    )
+    _append_observation(
+        round_obj,
+        current_user.name,
+        (
+            "Ronda iniciada desde la app móvil con "
+            f"{len(checkpoints)} checkpoints activos."
+        ),
+        now,
+    )
+
+    db.add(round_obj)
+    db.commit()
+
+    refreshed = _get_round_or_404(db, round_obj.id, with_logs=True)
+    return _round_detail(refreshed)
+
+
 @router.get(
     "/history",
     response_model=Paginated[RoundDetail],
@@ -375,10 +491,34 @@ def list_round_history(
             "completadas y canceladas."
         ),
     ),
-    date_from: datetime | None = Query(None, description="Desde created_at"),
+    date_from: datetime | None = Query(
+        None,
+        description=(
+            "Desde created_at. Si se omite, se aplica la ventana de "
+            f"{HISTORY_WINDOW_HOURS} horas."
+        ),
+    ),
     date_to: datetime | None = Query(None, description="Hasta created_at"),
+    last_hours: int = Query(
+        HISTORY_WINDOW_HOURS,
+        ge=1,
+        le=24 * 365,
+        description=(
+            "Ventana en horas cuando no se envía date_from "
+            f"({HISTORY_WINDOW_HOURS} por defecto)."
+        ),
+    ),
+    all_time: bool = Query(
+        False,
+        description="Ignora la ventana y devuelve todo el historial disponible.",
+    ),
 ) -> Paginated[RoundDetail]:
     """Rondas pasadas (y pausadas) con sus marcaciones para el historial móvil.
+
+    Por defecto solo devuelve las rondas de las **últimas 24 horas**
+    (``date_from = now - 24 h``). El cliente puede ampliar la ventana con
+    ``last_hours``, fijar un inicio exacto con ``date_from`` o desactivar el
+    filtro con ``all_time=true``.
 
     Las rondas pausadas se incluyen porque el guardia puede continuarlas desde
     la pantalla de historial. El alcance por rol es el mismo que en el resto
@@ -387,12 +527,16 @@ def list_round_history(
     allowed_company_ids, restricted_guard_id = _scope(current_user)
     statuses = (round_status,) if round_status else HISTORY_STATUSES
 
+    effective_date_from = ensure_utc(date_from)
+    if effective_date_from is None and not all_time:
+        effective_date_from = utc_now() - timedelta(hours=last_hours)
+
     items, total = crud_round.list_rounds(
         db,
         page=page,
         page_size=page_size,
         statuses=statuses,
-        date_from=date_from,
+        date_from=effective_date_from,
         date_to=date_to,
         allowed_company_ids=allowed_company_ids,
         restricted_to_guard_id=restricted_guard_id,
