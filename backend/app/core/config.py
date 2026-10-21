@@ -136,6 +136,13 @@ class Settings:
         self.DEFAULT_GEOFENCE_RADIUS_M: int = max(
             10, _as_int(os.getenv("DEFAULT_GEOFENCE_RADIUS_M"), 50)
         )
+        #: Exige que el guardia esté dentro del radio del checkpoint al marcar.
+        #: Desactivado por defecto: la marcación se registra igualmente y la
+        #: distancia se guarda como dato informativo. Poner ``true`` para
+        #: restaurar la validación de proximidad.
+        self.ENFORCE_CHECKPOINT_GEOFENCE: bool = _as_bool(
+            os.getenv("ENFORCE_CHECKPOINT_GEOFENCE"), False
+        )
         self.FIRST_ADMIN_NAME: str = os.getenv("FIRST_ADMIN_NAME", "Administrador")
         self.FIRST_ADMIN_EMAIL: str = os.getenv(
             "FIRST_ADMIN_EMAIL", "admin@sistema-rondas.local"

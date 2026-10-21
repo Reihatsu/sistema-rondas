@@ -122,6 +122,7 @@ Variables relevantes de `.env`:
 | `AUTO_SEED_DEMO` | Siembra datos demo cuando la base de datos está vacía |
 | `ROUND_INACTIVITY_TIMEOUT_MINUTES` | Minutos sin marcaciones antes de cancelar la ronda (20 por defecto) |
 | `DEFAULT_GEOFENCE_RADIUS_M` | Radio por defecto de la geovalla de un checkpoint (50 m) |
+| `ENFORCE_CHECKPOINT_GEOFENCE` | `true` exige estar dentro del radio del checkpoint para marcar; `false` (por defecto) acepta la marcación y solo registra la distancia |
 
 ### Despliegue en Render (SQLite, plan gratuito)
 

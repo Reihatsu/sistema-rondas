@@ -115,11 +115,14 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
    `GET /rounds/active`.
 6. `POST /rounds/{id}/checkin` recibe
    `{ qr_code, latitude, longitude, timestamp? }`. El backend valida que el
-   código exista, pertenezca a la empresa, esté dentro de la geovalla del punto
-   (`geofence_radius_m`, 50 m por defecto), no se haya marcado antes en la ronda
-   y que la ronda esté operativa. `timestamp` es opcional y permite conservar la
-   hora real de una marcación que se sincroniza más tarde. La respuesta incluye
-   la distancia, el tiempo del tramo y si la ronda quedó completa.
+   código exista, pertenezca a la empresa, no se haya marcado antes en la ronda
+   y que la ronda esté operativa. La validación de proximidad (geovalla del
+   punto, `geofence_radius_m`, 50 m por defecto) solo se aplica si
+   `ENFORCE_CHECKPOINT_GEOFENCE=true` en el backend; está desactivada por
+   defecto y la distancia se guarda igualmente en el log. `timestamp` es
+   opcional y permite conservar la hora real de una marcación que se sincroniza
+   más tarde. La respuesta incluye la distancia, el tiempo del tramo y si la
+   ronda quedó completa.
 7. Al marcar el último punto, el backend cierra la ronda como `COMPLETED`; el
    escáner y la pantalla activa felicitan al guardia y muestran el tiempo total.
 8. El historial (`GET /rounds/history`) lista por defecto las rondas de las
@@ -180,6 +183,23 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
   y ofrece **Abrir ajustes**. Los errores de red o del backend se muestran en
   una tarjeta con **Reintentar** y **Volver a la ronda**.
 
+### Build de Android en release (R8 y ML Kit)
+
+`android.enableMinifyInReleaseBuilds=true` activa R8 con
+`proguard-android-optimize.txt`. `expo-camera` decide si el escáner de códigos
+está disponible con
+`Class.forName("com.google.mlkit.vision.barcode.BarcodeScanning")`
+(`CameraUtils.isMLKitBarcodeScannerAvailable()`), un uso por reflexión que R8 no
+puede detectar: sin reglas `-keep` elimina la clase, la cámara abre pero
+`onBarcodeScanned` nunca se dispara y no aparece ningún error en pantalla.
+
+El plugin local `plugins/withMlKitKeepRules.js` (registrado en `app.json`)
+añade las reglas necesarias a `android/app/proguard-rules.pro` en cada
+`npx expo prebuild`, así que no hay que editar `android/` a mano. Si el
+problema reaparece en un APK release, comprobar que
+`android/app/build/outputs/mapping/release/mapping.txt` no contenga
+`com.google.mlkit.vision.barcode.BarcodeScanning -> R8$$REMOVED$$CLASS$$`.
+
 ### Probar el flujo
 
 - Cuenta demo: `guardia1@demo.com` / `guardia123` (el seed incluye una ronda
@@ -187,8 +207,10 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
 - El QR debe contener el **código** del punto (por ejemplo `QR-EMP1-PT01`), el
   mismo valor que muestra la pantalla de checkpoints.
 - Los puntos demo están geolocalizados en Madrid (`40.415462, -3.709687`, etc.).
-  Para probar desde otro lugar, actualice `latitude`/`longitude` del checkpoint
-  (`PUT /checkpoints/{id}`) o aumente `geofence_radius_m` (máx. 1000 m).
+  La marcación **no** exige cercanía al punto: `ENFORCE_CHECKPOINT_GEOFENCE`
+  está desactivado por defecto. Para volver a exigir la geovalla, arranque el
+  backend con `ENFORCE_CHECKPOINT_GEOFENCE=true` (y ajuste
+  `geofence_radius_m`, máx. 1000 m, si desea otro radio).
 - La validación GPS requiere un dispositivo o un emulador con ubicación
   simulada. La vista web puede abrir la cámara, pero el permiso y la posición
   dependen del navegador (y de HTTPS o `localhost`).

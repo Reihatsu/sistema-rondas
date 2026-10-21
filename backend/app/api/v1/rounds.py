@@ -6,8 +6,9 @@ Cubre el flujo operativo completo del guardia:
 * Creación e inicio directo de una ronda nueva por parte del guardia.
 * Inicio de rondas asignadas, pausa (con motivo obligatorio), reanudación y
   cancelación.
-* Marcación por QR con validación GPS, tiempos por tramo y cierre automático
-  de la ronda al visitar el último checkpoint.
+* Marcación por QR con ubicación GPS, tiempos por tramo y cierre automático
+  de la ronda al visitar el último checkpoint. La proximidad al punto solo se
+  exige si ``ENFORCE_CHECKPOINT_GEOFENCE`` está activo.
 * Cancelación automática cuando pasan más de
   ``ROUND_INACTIVITY_TIMEOUT_MINUTES`` minutos sin actividad.
 """
@@ -699,7 +700,7 @@ def register_checkin(
     db: DbSession,
     current_user: CurrentUser,
 ) -> RoundCheckInRead:
-    """Valida el QR, la geovalla y registra la marcación del guardia.
+    """Valida el QR, la ubicación y registra la marcación del guardia.
 
     Reglas aplicadas:
 
@@ -708,7 +709,8 @@ def register_checkin(
       pausada, completada o cancelada no admite marcaciones.
     * El código leído debe existir, estar activo y pertenecer a la empresa de
       la ronda.
-    * El punto debe tener coordenadas configuradas y el dispositivo debe estar
+    * El punto debe tener coordenadas configuradas; con
+      ``ENFORCE_CHECKPOINT_GEOFENCE`` activo el dispositivo además debe estar
       dentro del radio de la geovalla.
     * Un punto no puede marcarse dos veces en la misma ronda.
     * Si supera la ventana de inactividad, la ronda se cancela y se devuelve
@@ -812,8 +814,11 @@ def register_checkin(
         checkpoint.latitude,
         checkpoint.longitude,
     )
-    radius = checkpoint.geofence_radius_m or 50
-    if distance > radius:
+    # La proximidad solo se exige cuando ``ENFORCE_CHECKPOINT_GEOFENCE`` está
+    # activo. Desactivada, la distancia se sigue calculando y guardando en el
+    # log, pero una marcación lejana no bloquea el registro.
+    radius = checkpoint.geofence_radius_m or settings.DEFAULT_GEOFENCE_RADIUS_M
+    if settings.ENFORCE_CHECKPOINT_GEOFENCE and distance > radius:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
