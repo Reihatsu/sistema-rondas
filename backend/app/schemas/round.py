@@ -157,12 +157,26 @@ class RoundCheckInCreate(BaseModel):
     longitude: float = Field(
         ge=-180, le=180, description="Longitud capturada por el dispositivo."
     )
+    timestamp: datetime | None = Field(
+        default=None,
+        description=(
+            "Instante real del escaneo en el dispositivo (ISO 8601). Se usa "
+            "para marcaciones guardadas sin conexión; si se omite, se toma la "
+            "hora del servidor."
+        ),
+    )
 
     @field_validator("qr_code")
     @classmethod
     def normalize_qr_code(cls, value: str) -> str:
         """Normaliza el código para que el escaneo no dependa de mayúsculas."""
         return value.strip().upper()
+
+    @field_validator("timestamp")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
+        """Normaliza la hora enviada por el cliente a UTC."""
+        return ensure_utc(value)
 
 
 class RoundCheckInRead(BaseModel):

@@ -154,6 +154,11 @@ export interface CheckInPayload {
   qr_code: string;
   latitude: number;
   longitude: number;
+  /**
+   * Instante real del escaneo (ISO 8601). El backend lo usa para conservar la
+   * hora y el cronómetro cuando una marcación se sincroniza desde la cola.
+   */
+  timestamp?: string;
 }
 
 /** Respuesta de una marcación validada (`RoundCheckInRead`). */

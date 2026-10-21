@@ -20,6 +20,7 @@ import { useRouter, type Href } from 'expo-router';
 import { getErrorMessage } from '@/api/client';
 import { getActiveRound, startNewRound } from '@/api/rounds';
 import type { UserRole } from '@/api/types';
+import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
@@ -151,6 +152,8 @@ export default function HomeScreen() {
               Sesión activa. Ya puede registrar sus rondas y checkpoints.
             </ThemedText>
           </View>
+
+          <OfflineQueueBanner />
 
           {isGuard ? (
             <>

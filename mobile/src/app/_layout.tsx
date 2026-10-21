@@ -11,6 +11,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
+import { OfflineSyncManager } from '@/components/offline-sync-manager';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import AppNavigator from '@/navigation/AppNavigator';
 
@@ -41,6 +42,7 @@ export default function RootLayout() {
 
   return (
     <AuthProvider>
+      <OfflineSyncManager />
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
         <RootLayoutContent />
       </ThemeProvider>

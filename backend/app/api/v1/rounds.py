@@ -724,11 +724,48 @@ def register_checkin(
             detail="Solo el guardia asignado puede registrar marcaciones",
         )
 
-    if _expire_round_if_inactive(db, round_obj):
+    now = utc_now()
+    # Hora real del escaneo. Las marcaciones offline llegan después, pero deben
+    # conservar su instante original para el cronómetro y el historial.
+    event_time = ensure_utc(payload.timestamp) or now
+    if event_time > now:
+        # Un reloj adelantado no debe generar marcaciones futuras.
+        event_time = now
+
+    round_start = ensure_utc(round_obj.start_time)
+    if round_start is not None and event_time < round_start:
+        event_time = round_start
+
+    # Se evalúa la inactividad contra la hora del escaneo, no contra la hora de
+    # sincronización: un corte de red no convierte una ronda activa en cancelada.
+    if _expire_round_if_inactive(db, round_obj, now=event_time):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=INACTIVITY_CANCELLED_MESSAGE,
         )
+
+    # Idempotencia: si la respuesta de una marcación se perdió y la ronda ya se
+    # pausó/cerró, el reintento debe reconocer que el punto sí quedó registrado.
+    if round_obj.status in (
+        RoundStatus.PAUSED,
+        RoundStatus.COMPLETED,
+        RoundStatus.CANCELLED,
+    ):
+        existing_checkpoint = crud_checkpoint.get_checkpoint_by_code(
+            db, payload.qr_code
+        )
+        if existing_checkpoint is not None:
+            existing_log = crud_round.get_round_log_for_checkpoint(
+                db, round_id, existing_checkpoint.id
+            )
+            if existing_log is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Ya registró el punto «{existing_checkpoint.name}» "
+                        "en esta ronda."
+                    ),
+                )
 
     if round_obj.status is RoundStatus.PAUSED:
         raise HTTPException(
@@ -794,19 +831,30 @@ def register_checkin(
             detail=f"Ya registró el punto «{checkpoint.name}» en esta ronda.",
         )
 
-    now = utc_now()
     if round_obj.status is RoundStatus.PENDING:
         round_obj.status = RoundStatus.IN_PROGRESS
-        round_obj.start_time = round_obj.start_time or now
+        round_obj.start_time = round_obj.start_time or event_time
 
     previous_logs = crud_round.list_logs(db, round_id)
+    latest_log_time = max(
+        (
+            ensure_utc(item.timestamp)
+            for item in previous_logs
+            if item.timestamp is not None
+        ),
+        default=None,
+    )
+    if latest_log_time is not None and event_time < latest_log_time:
+        # Evita que un desfase del reloj del dispositivo retroceda el recorrido.
+        event_time = latest_log_time
+
     previous_elapsed = max(
         (item.elapsed_seconds or 0 for item in previous_logs),
         default=0,
     )
     round_elapsed = compute_elapsed_seconds(
         round_obj.start_time,
-        now,
+        event_time,
         round_obj.paused_seconds or 0,
     )
     segment = max(0, round_elapsed - previous_elapsed)
@@ -820,10 +868,12 @@ def register_checkin(
         longitude=payload.longitude,
         distance_m=round(distance, 1),
         elapsed_seconds=round_elapsed,
-        timestamp=now,
+        timestamp=event_time,
         status=RoundLogStatus.OK,
     )
 
+    # La actividad del servidor se actualiza al momento de la sincronización:
+    # así los elementos restantes del lote no vuelven a caducar mientras llegan.
     round_obj.last_activity_at = now
 
     active_checkpoints = crud_checkpoint.list_active_by_company(
@@ -842,7 +892,7 @@ def register_checkin(
 
     if round_completed:
         round_obj.status = RoundStatus.COMPLETED
-        round_obj.end_time = now
+        round_obj.end_time = event_time
         round_obj.paused_at = None
         _append_observation(
             round_obj,
@@ -851,7 +901,7 @@ def register_checkin(
                 "Ronda completada automáticamente: todos los checkpoints "
                 "fueron marcados."
             ),
-            now,
+            event_time,
         )
 
     db.add(round_obj)
@@ -872,7 +922,7 @@ def register_checkin(
         distance_m=round(distance, 1),
         checkpoint=_to_round_checkpoint(
             checkpoint,
-            visited_at=now,
+            visited_at=event_time,
             elapsed_seconds=round_elapsed,
             segment_seconds=segment,
         ),

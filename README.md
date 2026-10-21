@@ -30,7 +30,7 @@ sistema-rondas/
 │   │   ├── api/           # Axios + JWT + endpoints tipados
 │   │   ├── app/           # Rutas de Expo Router ((app)/rondas, (app)/scan, (app)/historial)
 │   │   ├── screens/       # Login, Home, Rondas, Historial y QRScanner
-│   │   └── services/      # Sesión (AsyncStorage) y GPS (expo-location)
+│   │   └── services/      # Sesión, GPS, caché de checkpoints y cola offline
 │   └── app.json           # Plugins de cámara y ubicación
 └── frontend/
     ├── src/
@@ -238,7 +238,8 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 - `GET /api/v1/rounds/active` (solo `GUARD`),
   `POST /api/v1/rounds/start-new` (solo `GUARD`: crea e inicia la ronda con los
   checkpoints activos de su empresa), `GET /api/v1/rounds/{id}/checkpoints`,
-  `POST /api/v1/rounds/{id}/checkin`, `POST /api/v1/rounds/{id}/start`
+  `POST /api/v1/rounds/{id}/checkin` (acepta `timestamp` opcional para
+  marcaciones offline), `POST /api/v1/rounds/{id}/start`
 - `POST /api/v1/rounds/{id}/pause` (`{comment}` obligatorio),
   `POST /api/v1/rounds/{id}/resume`, `POST /api/v1/rounds/{id}/cancel`
   (`{reason}` obligatorio)
@@ -262,6 +263,10 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
   caducan y pueden retomarse desde el historial.
 - `elapsed_seconds` de cada `RoundLog` y `segment_seconds` de cada checkpoint
   permiten mostrar tiempos acumulados y por tramo en la app.
+- La app móvil mantiene una cola offline en AsyncStorage cuando no hay red. Al
+  recuperar la conexión reenvía las marcaciones en orden con su `timestamp`
+  original. La inactividad se evalúa contra ese instante, por lo que una
+  sincronización tardía no cancela una ronda cuyas marcaciones fueron a tiempo.
 
 ## 7. Validación rápida
 

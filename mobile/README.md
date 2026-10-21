@@ -60,13 +60,13 @@ src/
 │       ├── rondas.tsx   # Ronda activa: cronómetro, acciones y checkpoints
 │       ├── historial.tsx # Rondas pasadas y pausadas
 │       └── scan.tsx     # Escáner QR (modal)
-├── components/     # ThemedText, ThemedView, RoundTimer, CommentPromptModal, ...
+├── components/     # ThemedText, ThemedView, RoundTimer, OfflineQueueBanner, ...
 ├── constants/      # Tema y espaciados
 ├── context/        # AuthContext (sesión JWT)
-├── hooks/          # useTheme
+├── hooks/          # useTheme y useOfflineQueue
 ├── navigation/     # AppNavigator (rutas protegidas)
 ├── screens/        # Login, Home, Rondas, Historial y QRScanner
-├── services/       # storage.ts (sesión) y location.ts (GPS)
+├── services/       # storage, location, offlineQueue y checkpointCache
 └── utils/          # datetime.ts (cronómetro y fechas)
 ```
 
@@ -113,10 +113,12 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
    app obtiene la ubicación con `expo-location` (`getCurrentPositionAsync`). El
    escáner muestra el cronómetro de la ronda en tiempo real, alimentado por
    `GET /rounds/active`.
-6. `POST /rounds/{id}/checkin` recibe `{ qr_code, latitude, longitude }`. El
-   backend valida que el código exista, pertenezca a la empresa, esté dentro de
-   la geovalla del punto (`geofence_radius_m`, 50 m por defecto), no se haya
-   marcado antes en la ronda y que la ronda esté operativa. La respuesta incluye
+6. `POST /rounds/{id}/checkin` recibe
+   `{ qr_code, latitude, longitude, timestamp? }`. El backend valida que el
+   código exista, pertenezca a la empresa, esté dentro de la geovalla del punto
+   (`geofence_radius_m`, 50 m por defecto), no se haya marcado antes en la ronda
+   y que la ronda esté operativa. `timestamp` es opcional y permite conservar la
+   hora real de una marcación que se sincroniza más tarde. La respuesta incluye
    la distancia, el tiempo del tramo y si la ronda quedó completa.
 7. Al marcar el último punto, el backend cierra la ronda como `COMPLETED`; el
    escáner y la pantalla activa felicitan al guardia y muestran el tiempo total.
@@ -126,11 +128,42 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
    que llama a `resume` y vuelve a `/rondas` con el cronómetro y el progreso
    restaurados.
 
+### Marcaciones sin conexión (cola offline)
+
+- `@react-native-community/netinfo` detecta la conectividad real. Si el guardia
+  escanea sin red, o la petición falla por timeout/red, la marcación se guarda
+  en una cola persistente de AsyncStorage (`src/services/offlineQueue.ts`) con
+  ronda, checkpoint, QR, coordenadas y la hora real del escaneo.
+- El guardia ve una tarjeta de estado en **Inicio**, **Mis Rondas** e
+  **Historial**: “Faltan X puntos por sincronizar. Se sincronizarán
+  automáticamente al conectarse a internet”. El contador se actualiza tras cada
+  envío.
+- Al recuperar la conexión (o al volver la app a primer plano) la cola se envía
+  **secuencialmente**, en orden cronológico. Cada elemento se elimina solo tras
+  una respuesta correcta del servidor. El JWT se adjunta igual que en cualquier
+  otra petición.
+- La cola está separada por `user_id`: una marcación guardada por un guardia no
+  se envía con la sesión de otro usuario del mismo dispositivo.
+- Los errores de red, `401`, `429` y `5xx` conservan el elemento como pendiente.
+  Un rechazo de negocio (por ejemplo, fuera de la geovalla) se marca como
+  fallido con su mensaje; el guardia puede **Reintentar ahora** o descartarlo.
+  Un `409` de “Ya registró el punto” se considera sincronizado para evitar
+  duplicados.
+- `src/services/checkpointCache.ts` conserva los códigos de los checkpoints de
+  la ronda para poder asociar el QR a su `checkpoint_id` aunque el escáner se
+  abra sin señal.
+- `POST /rounds/{id}/checkin` acepta `timestamp` opcional. El backend usa esa
+  hora para el log, el cronómetro y la ventana de inactividad, de modo que un
+  corte de red no cancela una ronda cuyas marcaciones ocurrieron a tiempo.
+
 ### Inactividad (20 minutos)
 
 - Si una ronda en curso supera `ROUND_INACTIVITY_TIMEOUT_MINUTES` (20 por
   defecto) sin marcaciones, el backend la cancela automáticamente y responde
   `409` con el motivo.
+- En las marcaciones que llegan desde la cola offline, la inactividad se evalúa
+  contra el `timestamp` real del escaneo, no contra la hora de sincronización.
+  Los elementos restantes del lote se envían con la actividad actualizada.
 - La app muestra una alerta **Ronda cancelada por inactividad**, el banner en la
   pantalla activa y desactiva el escaneo. En el historial queda como `CANCELLED`
   con `cancel_reason`.

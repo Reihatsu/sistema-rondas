@@ -22,6 +22,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { getErrorMessage } from '@/api/client';
 import { listRoundHistory, resumeRound } from '@/api/rounds';
 import type { RoundDetail, RoundStatus } from '@/api/types';
+import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
@@ -487,6 +488,10 @@ export default function RoundHistoryScreen() {
           </Pressable>
         </View>
 
+        <View style={styles.offlineBanner}>
+          <OfflineQueueBanner />
+        </View>
+
         {renderBody()}
       </SafeAreaView>
     </ThemedView>
@@ -515,6 +520,10 @@ const styles = StyleSheet.create({
   },
   linkText: {
     color: ACCENT,
+  },
+  offlineBanner: {
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.two,
   },
   header: {
     gap: Spacing.two,

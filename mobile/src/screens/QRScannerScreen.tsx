@@ -6,7 +6,7 @@
  * los duplicados, y devuelve mensajes en español que se muestran al guardia.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -25,19 +25,31 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getErrorMessage } from '@/api/client';
-import { checkIn, getActiveRound } from '@/api/rounds';
+import { checkIn, getActiveRound, listRoundCheckpoints } from '@/api/rounds';
 import type { CheckInResult } from '@/api/types';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import { getCurrentCoordinates, LocationError } from '@/services/location';
+import { useOfflineQueue } from '@/hooks/use-offline-queue';
+import {
+  cacheRoundCheckpoints,
+  getCachedRoundCheckpoints,
+  type CachedRoundCheckpoint,
+} from '@/services/checkpointCache';
+import {
+  getCurrentCoordinates,
+  LocationError,
+  type CurrentCoordinates,
+} from '@/services/location';
+import { isNetworkRequestError } from '@/services/offlineQueue';
 import { formatClock } from '@/utils/datetime';
 
 const ACCENT = '#208AEF';
 const SUCCESS = '#1E7F4F';
 const DANGER = '#D93025';
+const WARNING = '#B26A00';
 
-type Phase = 'scanning' | 'locating' | 'sending' | 'success' | 'error';
+type Phase = 'scanning' | 'locating' | 'sending' | 'success' | 'error' | 'queued';
 
 function ResultOverlay({
   variant,
@@ -45,23 +57,21 @@ function ResultOverlay({
   message,
   children,
 }: {
-  variant: 'success' | 'error';
+  variant: 'success' | 'error' | 'queued';
   title: string;
   message: string;
   children: ReactNode;
 }) {
   const isSuccess = variant === 'success';
+  const isQueued = variant === 'queued';
+  const backgroundColor = isSuccess ? SUCCESS : isQueued ? WARNING : DANGER;
 
   return (
     <View style={styles.resultOverlay}>
       <View style={styles.resultCard}>
-        <View
-          style={[
-            styles.resultIcon,
-            { backgroundColor: isSuccess ? SUCCESS : DANGER },
-          ]}>
+        <View style={[styles.resultIcon, { backgroundColor }]}>
           <ThemedText type="smallBold" style={styles.onAccent}>
-            {isSuccess ? '✓' : '!'}
+            {isSuccess ? '✓' : isQueued ? '⟳' : '!'}
           </ThemedText>
         </View>
 
@@ -85,10 +95,13 @@ export default function QRScannerScreen() {
     from?: string | string[];
   }>();
   const [permission, requestPermission] = useCameraPermissions();
+  const { enqueue: queueCheckIn, isOnline, pendingCount } = useOfflineQueue();
 
   const [phase, setPhase] = useState<Phase>('scanning');
   const [result, setResult] = useState<CheckInResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [queuedCheckpoint, setQueuedCheckpoint] = useState<string | null>(null);
+  const [cachedCheckpoints, setCachedCheckpoints] = useState<CachedRoundCheckpoint[]>([]);
   const [isExpired, setIsExpired] = useState(false);
   const [canOpenSettings, setCanOpenSettings] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
@@ -138,6 +151,7 @@ export default function QRScannerScreen() {
   const resetScanner = useCallback(() => {
     setResult(null);
     setErrorMessage(null);
+    setQueuedCheckpoint(null);
     setIsExpired(false);
     setCanOpenSettings(false);
     setPhase('scanning');
@@ -183,10 +197,85 @@ export default function QRScannerScreen() {
     return () => clearInterval(interval);
   }, [timerBase]);
 
+  // La caché permite asociar el QR con su checkpoint aunque el escáner se
+  // abra sin señal. Si hay conexión se actualiza con los datos del servidor.
+  useEffect(() => {
+    if (!hasValidRound) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void getCachedRoundCheckpoints(roundId).then((items) => {
+      if (!cancelled && items.length > 0) {
+        setCachedCheckpoints(items);
+      }
+    });
+
+    if (isOnline) {
+      void listRoundCheckpoints(roundId)
+        .then((items) => {
+          if (cancelled) {
+            return;
+          }
+
+          setCachedCheckpoints(
+            items.map((item) => ({
+              id: item.id,
+              name: item.name,
+              code: item.code.trim().toUpperCase(),
+            })),
+          );
+          void cacheRoundCheckpoints(roundId, items);
+        })
+        .catch(() => {
+          // Sin red se conserva la última copia local disponible.
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasValidRound, isOnline, roundId]);
+
+  const checkpointByCode = useMemo(
+    () =>
+      new Map(
+        cachedCheckpoints.map((checkpoint) => [
+          checkpoint.code.trim().toUpperCase(),
+          checkpoint,
+        ]),
+      ),
+    [cachedCheckpoints],
+  );
+
   const liveElapsed = timerBase
     ? timerBase.elapsed +
       (timerBase.running ? Math.floor((tick - timerBase.at) / 1000) : 0)
     : null;
+
+  const saveCheckInForLater = useCallback(
+    async (
+      code: string,
+      coordinates: CurrentCoordinates,
+      checkpoint: CachedRoundCheckpoint | undefined,
+      timestamp: string,
+    ) => {
+      const item = await queueCheckIn({
+        round_id: roundId,
+        checkpoint_id: checkpoint?.id ?? null,
+        checkpoint_name: checkpoint?.name ?? code,
+        qr_code: code,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        timestamp,
+      });
+
+      setQueuedCheckpoint(item.checkpoint_name);
+      setPhase('queued');
+    },
+    [queueCheckIn, roundId],
+  );
 
   const handleBarcodeScanned = useCallback(
     async (scan: BarcodeScanningResult) => {
@@ -207,22 +296,55 @@ export default function QRScannerScreen() {
 
       try {
         const coordinates = await getCurrentCoordinates();
+        const timestamp = new Date().toISOString();
+        let checkpoint = checkpointByCode.get(code.trim().toUpperCase());
+
+        // Si el efecto de caché aún no terminó (o la app se abrió offline),
+        // se intenta resolver el checkpoint directamente desde AsyncStorage.
+        if (!checkpoint) {
+          const cached = await getCachedRoundCheckpoints(roundId);
+          checkpoint = cached.find(
+            (item) => item.code.trim().toUpperCase() === code.trim().toUpperCase(),
+          );
+
+          if (checkpoint) {
+            setCachedCheckpoints(cached);
+          }
+        }
+
         setPhase('sending');
 
-        const response = await checkIn(roundId, {
-          qr_code: code,
-          latitude: coordinates.latitude,
-          longitude: coordinates.longitude,
-        });
+        // Si NetInfo ya confirma que no hay red, no se esperan 15 segundos al
+        // timeout de Axios: la marcación se guarda directamente.
+        if (!isOnline) {
+          await saveCheckInForLater(code, coordinates, checkpoint, timestamp);
+          return;
+        }
 
-        setResult(response);
-        setTimerBase({
-          elapsed: response.round_elapsed_seconds,
-          at: Date.now(),
-          running: response.round_status === 'IN_PROGRESS',
-        });
-        setTick(Date.now());
-        setPhase('success');
+        try {
+          const response = await checkIn(roundId, {
+            qr_code: code,
+            latitude: coordinates.latitude,
+            longitude: coordinates.longitude,
+            timestamp,
+          });
+
+          setResult(response);
+          setTimerBase({
+            elapsed: response.round_elapsed_seconds,
+            at: Date.now(),
+            running: response.round_status === 'IN_PROGRESS',
+          });
+          setTick(Date.now());
+          setPhase('success');
+        } catch (requestError) {
+          if (isNetworkRequestError(requestError)) {
+            await saveCheckInForLater(code, coordinates, checkpoint, timestamp);
+            return;
+          }
+
+          throw requestError;
+        }
       } catch (scanError) {
         if (scanError instanceof LocationError) {
           setCanOpenSettings(
@@ -247,7 +369,7 @@ export default function QRScannerScreen() {
         busyRef.current = false;
       }
     },
-    [hasValidRound, roundId],
+    [checkpointByCode, hasValidRound, isOnline, roundId, saveCheckInForLater],
   );
 
   if (!hasValidRound) {
@@ -489,6 +611,40 @@ export default function QRScannerScreen() {
               </Pressable>
             </>
           )}
+        </ResultOverlay>
+      ) : null}
+      {phase === 'queued' ? (
+        <ResultOverlay
+          variant="queued"
+          title="Marcación guardada sin conexión"
+          message={[
+            `${queuedCheckpoint ?? 'El punto escaneado'} quedó guardado en este dispositivo.`,
+            'Se enviará automáticamente cuando vuelva la conexión; el servidor validará entonces la ubicación.',
+            pendingCount === 1
+              ? 'Hay 1 punto pendiente de sincronizar.'
+              : pendingCount > 1
+                ? `Hay ${pendingCount} puntos pendientes de sincronizar.`
+                : 'Consulte el estado de sincronización en la pantalla de Inicio.',
+          ].join('\n')}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Escanear otro checkpoint"
+            onPress={resetScanner}
+            style={styles.primaryButton}>
+            <ThemedText type="smallBold" style={styles.onAccent}>
+              Seguir escaneando
+            </ThemedText>
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Volver a la ronda"
+            onPress={goBack}
+            style={styles.secondaryButtonDark}>
+            <ThemedText type="smallBold" style={styles.onAccent}>
+              Volver a la ronda
+            </ThemedText>
+          </Pressable>
         </ResultOverlay>
       ) : null}
 

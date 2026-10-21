@@ -43,10 +43,12 @@ import type {
 } from '@/api/types';
 import { CommentPromptModal } from '@/components/comment-prompt-modal';
 import { InactivityWarning, RoundTimer } from '@/components/round-timer';
+import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { cacheRoundCheckpoints } from '@/services/checkpointCache';
 import { formatClock, formatDuration, formatTime, secondsUntil } from '@/utils/datetime';
 
 const ACCENT = '#208AEF';
@@ -313,6 +315,7 @@ export default function RondasScreen() {
         }
 
         const items = await listRoundCheckpoints(active.id);
+        void cacheRoundCheckpoints(active.id, items);
         setFinishedRound(null);
         setRound(active);
         syncTimer(active);
@@ -451,6 +454,7 @@ export default function RondasScreen() {
 
       try {
         const items = await listRoundCheckpoints(created.id);
+        void cacheRoundCheckpoints(created.id, items);
         setCheckpoints(items);
       } catch {
         setCheckpoints([]);
@@ -489,6 +493,7 @@ export default function RondasScreen() {
 
       // Se recargan los puntos ya leídos para no perder el progreso.
       const items = await listRoundCheckpoints(updated.id);
+      void cacheRoundCheckpoints(updated.id, items);
       setCheckpoints(items);
     } catch (resumeError) {
       setError(handleActionError(resumeError));
@@ -863,6 +868,10 @@ export default function RondasScreen() {
           </Pressable>
         </View>
 
+        <View style={styles.offlineBanner}>
+          <OfflineQueueBanner />
+        </View>
+
         {renderBody()}
 
         {round && isInProgress ? (
@@ -979,6 +988,10 @@ const styles = StyleSheet.create({
   },
   linkText: {
     color: ACCENT,
+  },
+  offlineBanner: {
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.two,
   },
   header: {
     gap: Spacing.two,
