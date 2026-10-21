@@ -4,6 +4,12 @@
  * Flujo: permiso de cámara → lectura del QR → ubicación actual → marcación en
  * la API. El backend es la autoridad final: valida el código, la geovalla y
  * los duplicados, y devuelve mensajes en español que se muestran al guardia.
+ *
+ * Requisito nativo (Android): el lector usa ML Kit, que solo se empaqueta en el
+ * APK cuando `expo-camera` se declara en `app.json` con su plugin y
+ * `barcodeScannerEnabled: true`. Los config plugins se aplican durante el
+ * prebuild, así que cualquier cambio allí exige recompilar el APK (no basta una
+ * actualización OTA ni recargar el bundle).
  */
 
 import {
@@ -536,6 +542,12 @@ export default function QRScannerScreen() {
   // El `key` remonta la CameraView: expo-camera solo conecta el analizador
   // nativo de códigos cuando (re)crea la cámara, así que volver a escanear tras
   // un error o un envío requiere una vista nueva.
+  //
+  // `onBarcodeScanned` se pasa SIEMPRE (nunca `undefined`): expo-camera traduce
+  // su presencia a `barcodeScannerEnabled` en el módulo nativo y, si llega en
+  // `false` mientras la cámara se (re)crea, el analizador no se engancha nunca
+  // y el escáner queda mudo sin lanzar ningún error. El filtrado de lecturas
+  // duplicadas se hace dentro de `handleBarcodeScanned` con `scanned`/`busyRef`.
   return (
     <View style={styles.container}>
       <CameraView
@@ -544,7 +556,7 @@ export default function QRScannerScreen() {
         facing="back"
         enableTorch={torchEnabled}
         barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
-        onBarcodeScanned={scanned || isSubmitting ? undefined : handleBarcodeScanned}
+        onBarcodeScanned={handleBarcodeScanned}
         onCameraReady={() => {
           console.log('Escáner QR listo: cámara inicializada');
         }}

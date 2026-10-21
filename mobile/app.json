@@ -35,7 +35,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Permita el acceso a la cámara para escanear los códigos QR de los puntos de control.",
+          "cameraPermission": "La aplicación requiere acceso a la cámara para escanear los puntos de control QR.",
           "recordAudioAndroid": false,
           "barcodeScannerEnabled": true
         }
