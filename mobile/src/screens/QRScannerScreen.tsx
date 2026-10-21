@@ -6,6 +6,13 @@
  * los duplicados, y devuelve mensajes en español que se muestran al guardia.
  */
 
+import {
+  CameraView,
+  useCameraPermissions,
+  type BarcodeScanningResult,
+  type BarcodeSettings,
+} from 'expo-camera';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -14,15 +21,10 @@ import {
   Platform,
   Pressable,
   StyleSheet,
+  Vibration,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import {
-  CameraView,
-  useCameraPermissions,
-  type BarcodeScanningResult,
-} from 'expo-camera';
-import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getErrorMessage } from '@/api/client';
 import { checkIn, getActiveRound, listRoundCheckpoints } from '@/api/rounds';
@@ -50,6 +52,50 @@ const DANGER = '#D93025';
 const WARNING = '#B26A00';
 
 type Phase = 'scanning' | 'locating' | 'sending' | 'success' | 'error' | 'queued';
+
+/**
+ * Configuración del lector declarada fuera del componente.
+ *
+ * expo-camera reenvía estas opciones al detector nativo cada vez que cambia la
+ * identidad del objeto. Como la pantalla se vuelve a renderizar cada segundo
+ * (cronómetro), un literal dentro del JSX reconfiguraba el analizador
+ * constantemente y la lectura podía quedarse sin emitir eventos.
+ */
+const BARCODE_SCANNER_SETTINGS: BarcodeSettings = { barcodeTypes: ['qr'] };
+
+/** Caracteres invisibles que algunos generadores agregan al contenido del QR. */
+const INVISIBLE_CHARACTERS = /[\u200B-\u200D\uFEFF\u00AD]/g;
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/g;
+
+/**
+ * Normaliza el texto leído: quita espacios de los extremos, caracteres de
+ * anchura cero, espacios duros y saltos de línea. Los códigos de checkpoint
+ * llegan con basura invisible que el backend rechaza como código inválido.
+ */
+function sanitizeQrData(raw: string | null | undefined): string {
+  if (!raw) {
+    return '';
+  }
+
+  return raw
+    .replace(INVISIBLE_CHARACTERS, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(CONTROL_CHARACTERS, '')
+    .trim();
+}
+
+/** Confirmación física de la lectura; nunca interrumpe el flujo si falla. */
+function vibrateFeedback() {
+  if (Platform.OS === 'web') {
+    return;
+  }
+
+  try {
+    Vibration.vibrate(60);
+  } catch {
+    // En Android sin permiso VIBRATE la vibración no está disponible.
+  }
+}
 
 function ResultOverlay({
   variant,
@@ -98,6 +144,12 @@ export default function QRScannerScreen() {
   const { enqueue: queueCheckIn, isOnline, pendingCount } = useOfflineQueue();
 
   const [phase, setPhase] = useState<Phase>('scanning');
+  /** `true` en cuanto el sensor lee un QR: bloquea el lector hasta reiniciarlo. */
+  const [scanned, setScanned] = useState(false);
+  const [detectedCode, setDetectedCode] = useState<string | null>(null);
+  // Se incrementa para remontar la CameraView: expo-camera solo conecta el
+  // analizador de códigos cuando (re)crea la cámara.
+  const [cameraKey, setCameraKey] = useState(0);
   const [result, setResult] = useState<CheckInResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [queuedCheckpoint, setQueuedCheckpoint] = useState<string | null>(null);
@@ -152,8 +204,12 @@ export default function QRScannerScreen() {
     setResult(null);
     setErrorMessage(null);
     setQueuedCheckpoint(null);
+    setDetectedCode(null);
     setIsExpired(false);
     setCanOpenSettings(false);
+    setScanned(false);
+    busyRef.current = false;
+    setCameraKey((current) => current + 1);
     setPhase('scanning');
   }, []);
 
@@ -278,21 +334,32 @@ export default function QRScannerScreen() {
   );
 
   const handleBarcodeScanned = useCallback(
-    async (scan: BarcodeScanningResult) => {
-      if (busyRef.current || !hasValidRound) {
+    async (scanningResult: BarcodeScanningResult) => {
+      if (busyRef.current || scanned || !hasValidRound) {
         return;
       }
 
-      const code = scan.data?.trim();
+      // Traza inmediata: confirma que el sensor físico entregó un texto.
+      console.log('QR Detectado:', scanningResult.data);
+
+      const code = sanitizeQrData(scanningResult.data);
 
       if (!code) {
+        console.log('QR Detectado sin contenido útil tras limpiar caracteres');
         return;
       }
 
+      console.log('QR normalizado:', code);
+
       busyRef.current = true;
+      setScanned(true);
+      setDetectedCode(code);
       setErrorMessage(null);
       setCanOpenSettings(false);
       setPhase('locating');
+
+      // Alerta visual (el código aparece en pantalla) y vibración de respaldo.
+      vibrateFeedback();
 
       try {
         const coordinates = await getCurrentCoordinates();
@@ -369,7 +436,7 @@ export default function QRScannerScreen() {
         busyRef.current = false;
       }
     },
-    [checkpointByCode, hasValidRound, isOnline, roundId, saveCheckInForLater],
+    [checkpointByCode, hasValidRound, isOnline, roundId, saveCheckInForLater, scanned],
   );
 
   if (!hasValidRound) {
@@ -464,22 +531,26 @@ export default function QRScannerScreen() {
     );
   }
 
-  const isBusy = phase === 'locating' || phase === 'sending';
+  const isSubmitting = phase === 'locating' || phase === 'sending';
 
+  // El `key` remonta la CameraView: expo-camera solo conecta el analizador
+  // nativo de códigos cuando (re)crea la cámara, así que volver a escanear tras
+  // un error o un envío requiere una vista nueva.
   return (
     <View style={styles.container}>
       <CameraView
+        key={cameraKey}
         style={StyleSheet.absoluteFill}
         facing="back"
         enableTorch={torchEnabled}
-        barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-        onBarcodeScanned={
-          phase === 'scanning'
-            ? (scan) => {
-                void handleBarcodeScanned(scan);
-              }
-            : undefined
-        }
+        barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
+        onBarcodeScanned={scanned || isSubmitting ? undefined : handleBarcodeScanned}
+        onCameraReady={() => {
+          console.log('Escáner QR listo: cámara inicializada');
+        }}
+        onMountError={(event) => {
+          console.log('Error al iniciar la cámara:', event.message);
+        }}
       />
 
       <View style={styles.overlay} pointerEvents="box-none">
@@ -543,14 +614,24 @@ export default function QRScannerScreen() {
               </View>
             ) : null}
 
-            {isBusy ? (
+            {isSubmitting ? (
               <View style={styles.busyCard}>
                 <ActivityIndicator color="#FFFFFF" />
-                <ThemedText type="smallBold" style={styles.onAccent}>
-                  {phase === 'locating'
-                    ? 'Obteniendo su ubicación…'
-                    : 'Validando y registrando…'}
-                </ThemedText>
+                <View style={styles.busyTextGroup}>
+                  <ThemedText type="smallBold" style={styles.onAccent}>
+                    {phase === 'locating'
+                      ? 'Obteniendo su ubicación…'
+                      : 'Validando y registrando…'}
+                  </ThemedText>
+                  {detectedCode ? (
+                    <ThemedText
+                      type="small"
+                      style={styles.footerHint}
+                      numberOfLines={1}>
+                      QR leído: {detectedCode}
+                    </ThemedText>
+                  ) : null}
+                </View>
               </View>
             ) : (
               <ThemedText type="small" style={styles.footerHint}>
@@ -670,11 +751,11 @@ export default function QRScannerScreen() {
           {isExpired ? null : (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Reintentar el escaneo"
+              accessibilityLabel="Volver a escanear el código QR"
               onPress={resetScanner}
               style={styles.primaryButton}>
               <ThemedText type="smallBold" style={styles.onAccent}>
-                Reintentar
+                Volver a escanear
               </ThemedText>
             </Pressable>
           )}
@@ -771,10 +852,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+    maxWidth: '100%',
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
     borderRadius: Spacing.three,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
+  },
+  busyTextGroup: {
+    flexShrink: 1,
+    gap: Spacing.half,
   },
   permissionLoading: {
     flex: 1,
