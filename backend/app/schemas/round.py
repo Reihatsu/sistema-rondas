@@ -4,14 +4,23 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from app.core.timeutils import ensure_utc
 from app.models.enums import (
+    PointType,
     RoundCheckpointStatus,
     RoundLogStatus,
     RoundStatus,
 )
+from app.schemas.checkpoint import normalize_uid
 from app.schemas.company import CompanySummary
 from app.schemas.user import UserSummary
 
@@ -122,6 +131,11 @@ class RoundCheckpointRead(BaseModel):
     id: int
     name: str
     code: str
+    #: UID de la etiqueta NFC del punto (``None`` en puntos QR). Permite a la
+    #: app móvil validar la etiqueta leída y marcar el punto sin conexión.
+    uid_nfc: str | None = None
+    #: Tecnología del punto; la app móvil decide entre el lector QR y el NFC.
+    point_type: PointType | None = None
     location_description: str | None = None
     latitude: float | None = None
     longitude: float | None = None
@@ -141,21 +155,43 @@ class RoundCheckpointRead(BaseModel):
 
 
 class RoundCheckInCreate(BaseModel):
-    """Payload de la marcación de un checkpoint mediante QR."""
+    """Payload de la marcación de un checkpoint por QR o NFC.
+
+    Debe enviarse al menos uno de los dos identificadores:
+
+    * ``qr_code``: contenido leído del código impreso. Exige coordenadas GPS
+      porque la geovalla del punto se valida con ellas.
+    * ``nfc_uid``: UID físico leído de la etiqueta. Las coordenadas son
+      opcionales: si no se envían, la marcación se registra con distancia 0.
+    """
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    qr_code: str = Field(
+    qr_code: str | None = Field(
+        default=None,
         min_length=2,
         max_length=100,
         examples=["QR-EMP1-PT01"],
         description="Contenido leído del código QR (código único del punto).",
     )
-    latitude: float = Field(
-        ge=-90, le=90, description="Latitud capturada por el dispositivo."
+    nfc_uid: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=100,
+        examples=["04A23B4C5D6E"],
+        description="UID físico de la etiqueta NFC leída por el dispositivo.",
     )
-    longitude: float = Field(
-        ge=-180, le=180, description="Longitud capturada por el dispositivo."
+    latitude: float | None = Field(
+        default=None,
+        ge=-90,
+        le=90,
+        description="Latitud capturada por el dispositivo (obligatoria por QR).",
+    )
+    longitude: float | None = Field(
+        default=None,
+        ge=-180,
+        le=180,
+        description="Longitud capturada por el dispositivo (obligatoria por QR).",
     )
     timestamp: datetime | None = Field(
         default=None,
@@ -168,15 +204,34 @@ class RoundCheckInCreate(BaseModel):
 
     @field_validator("qr_code")
     @classmethod
-    def normalize_qr_code(cls, value: str) -> str:
+    def normalize_qr_code(cls, value: str | None) -> str | None:
         """Normaliza el código para que el escaneo no dependa de mayúsculas."""
-        return value.strip().upper()
+        if value is None:
+            return None
+        return value.strip().upper() or None
+
+    @field_validator("nfc_uid")
+    @classmethod
+    def normalize_nfc_uid(cls, value: str | None) -> str | None:
+        """Canoniza el UID NFC para aceptar formatos con o sin separadores."""
+        return normalize_uid(value)
 
     @field_validator("timestamp")
     @classmethod
     def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
         """Normaliza la hora enviada por el cliente a UTC."""
         return ensure_utc(value)
+
+    @model_validator(mode="after")
+    def validate_marking(self) -> "RoundCheckInCreate":
+        """Valida el identificador y las coordenadas según la tecnología."""
+        if self.qr_code is None and self.nfc_uid is None:
+            raise ValueError("Debe indicar qr_code o nfc_uid")
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Debe indicar latitud y longitud juntas")
+        if self.qr_code is not None and self.latitude is None:
+            raise ValueError("Las marcaciones por QR requieren latitud y longitud")
+        return self
 
 
 class RoundCheckInRead(BaseModel):

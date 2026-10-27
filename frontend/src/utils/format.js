@@ -32,6 +32,22 @@ export const LOG_STATUS_LABELS = {
   SKIPPED: "Omitido",
 };
 
+/** Tecnología con la que se identifican los puntos de control de una empresa. */
+export const POINT_TYPE_LABELS = {
+  QR: "Código QR",
+  NFC: "Etiqueta NFC",
+};
+
+export const POINT_TYPE_SHORT_LABELS = {
+  QR: "QR",
+  NFC: "NFC",
+};
+
+export const POINT_TYPE_TONES = {
+  QR: "info",
+  NFC: "purple",
+};
+
 export const STATUS_TONES = {
   PENDING: "neutral",
   IN_PROGRESS: "info",

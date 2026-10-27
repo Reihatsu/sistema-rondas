@@ -105,9 +105,17 @@ export async function startRound(roundId: number): Promise<RoundDetail> {
  * El backend elige la empresa activa asignada con checkpoints operativos y
  * devuelve la ronda ya en `IN_PROGRESS`. Si el guardia ya tiene una ronda
  * abierta responde `409` con el identificador de esa ronda.
+ *
+ * `companyId` es opcional y viaja como query param: el selector de empresa de
+ * la app móvil lo envía para forzar la empresa cuando el guardia tiene varias.
  */
-export async function startNewRound(): Promise<RoundDetail> {
-  const { data } = await api.post<RoundDetail>('/rounds/start-new');
+export async function startNewRound(companyId?: number): Promise<RoundDetail> {
+  const { data } = await api.post<RoundDetail>('/rounds/start-new', null, {
+    params:
+      typeof companyId === 'number' && Number.isInteger(companyId) && companyId > 0
+        ? { company_id: companyId }
+        : undefined,
+  });
   return data;
 }
 

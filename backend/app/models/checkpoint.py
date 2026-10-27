@@ -32,6 +32,8 @@ class Checkpoint(Base):
         # El código se comparte entre QR y NFC; debe ser único en todo el
         # sistema para que una lectura identifique un único punto.
         UniqueConstraint("code", name="uq_checkpoints_code"),
+        #: UID físico de la etiqueta NFC; solo los puntos NFC lo utilizan.
+        UniqueConstraint("uid_nfc", name="uq_checkpoints_uid_nfc"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -40,6 +42,10 @@ class Checkpoint(Base):
     )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
+    #: UID de la etiqueta NFC normalizado (hex en mayúsculas, sin separadores).
+    uid_nfc: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True
+    )
     location_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: Coordenadas del punto para validar la geovalla al marcar por QR.
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)

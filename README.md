@@ -1,10 +1,10 @@
 # Sistema de Rondas
 
-Monorepo de un sistema de control de rondas de vigilancia con checkpoints NFC.
+Monorepo de un sistema de control de rondas de vigilancia con checkpoints QR y NFC.
 
 - **Backend**: FastAPI + SQLAlchemy 2 + MySQL (PyMySQL) / SQLite (fallback) + JWT (OAuth2 password flow).
 - **Frontend**: React 18 + Vite + Tailwind CSS + Lucide React + React Router + Axios.
-- **Móvil**: Expo / React Native + Expo Router (`mobile/`), con escaneo QR y validación GPS de checkpoints.
+- **Móvil**: Expo / React Native + Expo Router (`mobile/`), con escaneo QR (validación GPS) y lectura NFC de checkpoints, y selección de empresa al iniciar la ronda.
 - **Base de datos**: MySQL local o SQLite para despliegues gratuitos (Render); scripts SQL en `database/` y migraciones Alembic en `backend/alembic/`.
 
 ```
@@ -18,7 +18,7 @@ sistema-rondas/
 │   │   ├── schemas/       # esquemas Pydantic
 │   │   ├── db/            # sesión, init_db, seed del admin
 │   │   └── main.py
-│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints, 0003_checkin_gps, 0004_round_lifecycle)
+│   ├── alembic/           # migraciones (0001_initial_schema, 0002_checkpoints, 0003_checkin_gps, 0004_round_lifecycle, 0005_point_types)
 │   ├── init_db.py         # crea tablas + datos demo (contraseñas bcrypt)
 │   ├── main.py            # entrypoint uvicorn
 │   └── requirements.txt
@@ -29,9 +29,10 @@ sistema-rondas/
 │   ├── src/
 │   │   ├── api/           # Axios + JWT + endpoints tipados
 │   │   ├── app/           # Rutas de Expo Router ((app)/rondas, (app)/scan, (app)/historial)
-│   │   ├── screens/       # Login, Home, Rondas, Historial y QRScanner
-│   │   └── services/      # Sesión, GPS, caché de checkpoints y cola offline
-│   └── app.json           # Plugins de cámara y ubicación
+│   │   ├── components/    # themed-*, RoundTimer, OfflineQueueBanner, CompanyPicker
+│   │   ├── screens/       # Login, Home, Rondas, Historial y QRScanner (QR/NFC)
+│   │   └── services/      # Sesión, GPS, lector NFC, caché de checkpoints y cola offline
+│   └── app.json           # Plugins de cámara, ubicación y NFC
 └── frontend/
     ├── src/
     │   ├── layouts/OdooLayout.jsx   # sidebar + topbar responsive
@@ -123,6 +124,15 @@ Variables relevantes de `.env`:
 | `ROUND_INACTIVITY_TIMEOUT_MINUTES` | Minutos sin marcaciones antes de cancelar la ronda (20 por defecto) |
 | `DEFAULT_GEOFENCE_RADIUS_M` | Radio por defecto de la geovalla de un checkpoint (50 m) |
 | `ENFORCE_CHECKPOINT_GEOFENCE` | `true` exige estar dentro del radio del checkpoint para marcar; `false` (por defecto) acepta la marcación y solo registra la distancia |
+
+Cada empresa define su tecnología de puntos (`companies.point_type`, `QR` o
+`NFC`) y sus puntos de control guardan el identificador que se lee en campo:
+`code` para el QR y `uid_nfc` para la etiqueta física. La app móvil abre la
+cámara o el lector NFC según esa configuración. Las marcaciones QR exigen
+coordenadas GPS; las marcaciones NFC pueden enviarse **sin** GPS (se registran
+con distancia 0, porque la etiqueta física ya prueba la presencia en el punto).
+Si una marcación NFC llega con coordenadas, la geovalla se evalúa igual que en
+QR.
 
 ### Despliegue en Render (SQLite, plan gratuito)
 
@@ -218,7 +228,7 @@ imprimirlo; la baja es lógica (`is_active = false`) para conservar el históric
 | --- | --- |
 | `ADMIN` | Todo: empresas, usuarios, asignaciones, puntos de control y todas las rondas |
 | `SUPERVISOR` | Sus guardias, puntos de control (lectura/escritura) y rondas de sus empresas asignadas |
-| `GUARD` | Sus propias rondas, checkpoints de la ronda y marcación QR con validación GPS |
+| `GUARD` | Sus propias rondas, checkpoints de la ronda y marcación QR (validación GPS) o NFC (etiqueta física) |
 | `COMPANY_USER` | Rondas y puntos de control (solo lectura) de las empresas que tiene asignadas |
 
 Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
@@ -238,9 +248,10 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
   `POST /api/v1/rounds/{id}/comments`
 - `GET /api/v1/rounds/active` (solo `GUARD`),
   `POST /api/v1/rounds/start-new` (solo `GUARD`: crea e inicia la ronda con los
-  checkpoints activos de su empresa), `GET /api/v1/rounds/{id}/checkpoints`,
-  `POST /api/v1/rounds/{id}/checkin` (acepta `timestamp` opcional para
-  marcaciones offline), `POST /api/v1/rounds/{id}/start`
+  checkpoints activos de la empresa; acepta `company_id` opcional cuando el
+  guardia tiene varias empresas), `GET /api/v1/rounds/{id}/checkpoints`,
+  `POST /api/v1/rounds/{id}/checkin` (acepta `qr_code` **o** `nfc_uid`, y
+  `timestamp` opcional para marcaciones offline), `POST /api/v1/rounds/{id}/start`
 - `POST /api/v1/rounds/{id}/pause` (`{comment}` obligatorio),
   `POST /api/v1/rounds/{id}/resume`, `POST /api/v1/rounds/{id}/cancel`
   (`{reason}` obligatorio)
@@ -249,9 +260,15 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
 ### Ciclo de vida de las rondas
 
 - El guardia crea e inicia su ronda desde la app con
-  `POST /rounds/start-new`: la API la asigna a él y a su empresa activa, toma
-  los checkpoints activos de esa empresa y la deja en `IN_PROGRESS`. Si ya
-  tiene una ronda en curso o pausada responde `409` para evitar duplicados.
+  `POST /rounds/start-new`: la API la asigna a él y a una de sus empresas
+  activas, toma los checkpoints activos de esa empresa y la deja en
+  `IN_PROGRESS`. Si el guardia tiene varias empresas, la app envía el
+  `company_id` elegido en el selector; si se omite, se usa la primera empresa
+  activa con puntos operativos. Si ya tiene una ronda en curso o pausada
+  responde `409` para evitar duplicados (el bloqueo lo aplica el servidor).
+- La marcación (`POST /rounds/{id}/checkin`) se resuelve por `qr_code` o por
+  `nfc_uid`. El UID se normaliza a hexadecimal en mayúsculas sin separadores,
+  igual que se guarda en `checkpoints.uid_nfc`.
 - El cronómetro se calcula en el servidor: `elapsed_seconds` descuenta
   `paused_seconds` y se congela en pausas y cierres.
 - `GET /rounds/history` devuelve por defecto las rondas de las últimas 24 horas

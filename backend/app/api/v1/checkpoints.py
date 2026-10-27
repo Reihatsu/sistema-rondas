@@ -24,7 +24,7 @@ from app.api.deps import (
 )
 from app.crud import checkpoint as crud_checkpoint
 from app.crud import company as crud_company
-from app.models import Checkpoint, User, UserRole
+from app.models import Checkpoint, PointType, User, UserRole
 from app.schemas.checkpoint import (
     CheckpointCreate,
     CheckpointRead,
@@ -132,7 +132,12 @@ def create_checkpoint(
     db: DbSession,
     current_user: SupervisorOrAdminUser,
 ) -> CheckpointRead:
-    """Crea un punto validando empresa y código único."""
+    """Crea un punto validando empresa, tipo y unicidad.
+
+    * En empresas ``NFC`` el ``uid_nfc`` es obligatorio y el código se genera
+      automáticamente si no se envía.
+    * En empresas ``QR`` cualquier ``uid_nfc`` recibido se ignora.
+    """
     company = crud_company.get_company(db, payload.company_id)
     if company is None:
         raise HTTPException(
@@ -141,11 +146,32 @@ def create_checkpoint(
         )
     ensure_company_access(current_user, company.id)
 
-    if crud_checkpoint.get_checkpoint_by_code(db, payload.code) is not None:
+    if company.point_type is PointType.NFC and payload.uid_nfc is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Esta empresa usa etiquetas NFC: indique el UID de la etiqueta "
+                "del punto de control."
+            ),
+        )
+
+    uid_nfc = payload.uid_nfc if company.point_type is PointType.NFC else None
+    code = payload.code or crud_checkpoint.generate_checkpoint_code(
+        db, company.id, company.point_type
+    )
+
+    if crud_checkpoint.get_checkpoint_by_code(db, code) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Ya existe un punto de control con ese código",
         )
+    if uid_nfc is not None and crud_checkpoint.get_checkpoint_by_uid(db, uid_nfc):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe un punto de control con ese UID NFC",
+        )
+
+    payload = payload.model_copy(update={"code": code, "uid_nfc": uid_nfc})
 
     try:
         checkpoint = crud_checkpoint.create_checkpoint(db, payload)
@@ -176,17 +202,48 @@ def update_checkpoint(
 
     data = payload.model_dump(exclude_unset=True)
 
-    # Si se mueve el punto a otra empresa, el supervisor debe tener acceso a
-    # la empresa destino (el ADMIN no está restringido).
-    target_company_id = data.get("company_id")
-    if target_company_id is not None:
-        target_company = crud_company.get_company(db, target_company_id)
-        if target_company is None:
+    # La empresa destino define la tecnología del punto. Al mover un punto de
+    # empresa (o al cambiar el tipo de la empresa) se ajusta el UID NFC.
+    target_company_id = data.get("company_id") or checkpoint.company_id
+    target_company = crud_company.get_company(db, target_company_id)
+    if target_company is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Empresa no encontrada",
+        )
+    ensure_company_access(current_user, target_company.id)
+
+    updates: dict[str, object] = {}
+
+    # El código no puede quedar vacío: si llega ``null`` se conserva el actual.
+    if "code" in data and data["code"] is None:
+        updates["code"] = checkpoint.code
+        data.pop("code")
+
+    if target_company.point_type is PointType.NFC:
+        target_uid = data.get("uid_nfc", checkpoint.uid_nfc)
+        if target_uid is None:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Empresa no encontrada",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Esta empresa usa etiquetas NFC: indique el UID de la "
+                    "etiqueta del punto de control."
+                ),
             )
-        ensure_company_access(current_user, target_company.id)
+    else:
+        target_uid = None
+
+    updates["uid_nfc"] = target_uid
+
+    if target_uid is not None and target_uid != checkpoint.uid_nfc:
+        duplicate_uid = crud_checkpoint.get_checkpoint_by_uid(
+            db, target_uid, exclude_id=checkpoint.id
+        )
+        if duplicate_uid is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un punto de control con ese UID NFC",
+            )
 
     new_code = data.get("code")
     if new_code is not None and new_code != checkpoint.code:
@@ -200,7 +257,9 @@ def update_checkpoint(
             )
 
     try:
-        checkpoint = crud_checkpoint.update_checkpoint(db, checkpoint, payload)
+        checkpoint = crud_checkpoint.update_checkpoint(
+            db, checkpoint, payload.model_copy(update=updates)
+        )
     except IntegrityError:
         db.rollback()
         raise HTTPException(

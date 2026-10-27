@@ -5,7 +5,7 @@
  * `AppNavigator` vuelve a la pantalla de login.
  */
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -20,6 +20,7 @@ import { useRouter, type Href } from 'expo-router';
 import { getErrorMessage } from '@/api/client';
 import { getActiveRound, startNewRound } from '@/api/rounds';
 import type { UserRole } from '@/api/types';
+import { CompanyPicker } from '@/components/company-picker';
 import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -56,10 +57,28 @@ export default function HomeScreen() {
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isStartingRound, setIsStartingRound] = useState(false);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<number | null>(null);
 
   const displayName = user?.name ?? 'Guardia';
   const firstName = displayName.split(' ')[0];
   const isGuard = user?.role === 'GUARD';
+
+  /** Empresas activas asignadas al usuario; una ronda usa solo una. */
+  const companies = useMemo(
+    () => (user?.companies ?? []).filter((company) => company.is_active),
+    [user],
+  );
+
+  // La selección debe apuntar siempre a una empresa vigente del usuario.
+  useEffect(() => {
+    setSelectedCompanyId((current) => {
+      if (current !== null && companies.some((company) => company.id === current)) {
+        return current;
+      }
+
+      return companies[0]?.id ?? null;
+    });
+  }, [companies]);
 
   /**
    * Crea una ronda nueva desde el servidor y abre directamente el escáner.
@@ -68,7 +87,7 @@ export default function HomeScreen() {
    * del backend y se ofrece continuarla para no dejar una ronda huérfana.
    */
   async function handleStartNewRound() {
-    if (!isGuard || isStartingRound) {
+    if (!isGuard || isStartingRound || companies.length === 0) {
       return;
     }
 
@@ -98,11 +117,15 @@ export default function HomeScreen() {
         return;
       }
 
-      const created = await startNewRound();
+      const created = await startNewRound(selectedCompanyId ?? undefined);
 
       router.push({
         pathname: '/scan',
-        params: { roundId: String(created.id), from: 'home' },
+        params: {
+          roundId: String(created.id),
+          from: 'home',
+          pointType: created.company?.point_type ?? 'QR',
+        },
       });
     } catch (startError) {
       const message = getErrorMessage(startError);
@@ -157,20 +180,41 @@ export default function HomeScreen() {
 
           {isGuard ? (
             <>
+              {companies.length > 1 ? (
+                <CompanyPicker
+                  companies={companies}
+                  selectedCompanyId={selectedCompanyId}
+                  onSelect={setSelectedCompanyId}
+                  disabled={isStartingRound}
+                  title="Empresa de la ronda"
+                />
+              ) : null}
+
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Iniciar una nueva ronda"
+                accessibilityLabel={
+                  companies.length === 0
+                    ? 'No puede iniciar una ronda sin empresas activas'
+                    : 'Iniciar una nueva ronda'
+                }
                 accessibilityState={{
-                  disabled: isStartingRound,
+                  disabled: isStartingRound || companies.length === 0,
                   busy: isStartingRound,
                 }}
-                disabled={isStartingRound}
+                disabled={isStartingRound || companies.length === 0}
                 onPress={() => {
                   void handleStartNewRound();
                 }}
                 style={({ pressed }) => [
                   styles.primaryAction,
-                  { opacity: isStartingRound ? 0.7 : pressed ? 0.85 : 1 },
+                  {
+                    opacity:
+                      isStartingRound || companies.length === 0
+                        ? 0.7
+                        : pressed
+                          ? 0.85
+                          : 1,
+                  },
                 ]}>
                 <View style={styles.primaryActionBody}>
                   <ThemedText type="smallBold" style={styles.primaryActionTitle}>
@@ -178,7 +222,7 @@ export default function HomeScreen() {
                   </ThemedText>
                   <ThemedText type="small" style={styles.primaryActionSubtitle}>
                     Cree una ronda y comience a escanear los checkpoints activos
-                    de su empresa.
+                    de la empresa seleccionada.
                   </ThemedText>
                 </View>
                 {isStartingRound ? (
@@ -187,6 +231,13 @@ export default function HomeScreen() {
                   <ThemedText style={styles.primaryActionArrow}>›</ThemedText>
                 )}
               </Pressable>
+
+              {companies.length === 0 ? (
+                <ThemedText type="small" themeColor="textSecondary">
+                  No tiene empresas activas asignadas. Solicite al administrador que
+                  le asigne una empresa con puntos de control para poder iniciar rondas.
+                </ThemedText>
+              ) : null}
 
               <Pressable
                 accessibilityRole="button"
@@ -205,7 +256,7 @@ export default function HomeScreen() {
                   <ThemedText type="smallBold">Mi ronda activa</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
                     Consulte el cronómetro, pause o reanude la ronda y registre
-                    sus checkpoints con QR.
+                    sus checkpoints con QR o NFC.
                   </ThemedText>
                 </View>
                 <ThemedText style={styles.secondaryActionArrow}>›</ThemedText>

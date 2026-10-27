@@ -59,14 +59,14 @@ src/
 │       ├── index.tsx    # Inicio
 │       ├── rondas.tsx   # Ronda activa: cronómetro, acciones y checkpoints
 │       ├── historial.tsx # Rondas pasadas y pausadas
-│       └── scan.tsx     # Escáner QR (modal)
-├── components/     # ThemedText, ThemedView, RoundTimer, OfflineQueueBanner, ...
+│       └── scan.tsx     # Escáner QR/NFC (modal)
+├── components/     # ThemedText, ThemedView, RoundTimer, OfflineQueueBanner, CompanyPicker, ...
 ├── constants/      # Tema y espaciados
 ├── context/        # AuthContext (sesión JWT)
 ├── hooks/          # useTheme y useOfflineQueue
 ├── navigation/     # AppNavigator (rutas protegidas)
-├── screens/        # Login, Home, Rondas, Historial y QRScanner
-├── services/       # storage, location, offlineQueue y checkpointCache
+├── screens/        # Login, Home, Rondas, Historial y QRScanner (QR/NFC)
+├── services/       # storage, location, nfc, nfcUid, offlineQueue y checkpointCache
 └── utils/          # datetime.ts (cronómetro y fechas)
 ```
 
@@ -86,16 +86,23 @@ src/
 > almacenamiento seguro, migrar `src/services/storage.ts` a `expo-secure-store`
 > es el único cambio necesario.
 
-## Módulo operativo del guardia (ciclo de vida + QR + GPS)
+## Módulo operativo del guardia (ciclo de vida + QR/NFC + GPS)
 
 El rol `GUARD` ve en el inicio el botón destacado **Iniciar Nueva Ronda**, además
 de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
 
-1. **Iniciar Nueva Ronda** llama a `POST /rounds/start-new`. El backend crea la
-   ronda asignada al guardia y a su empresa activa, con los checkpoints activos
-   de esa empresa, y la deja en `IN_PROGRESS`. La app abre directamente `/scan`
-   para comenzar el recorrido. Si el guardia ya tiene una ronda en curso o
-   pausada, se le ofrece continuarla en lugar de crear otra.
+Si el guardia tiene varias empresas activas asignadas, tanto **Inicio** como
+**Mis Rondas** muestran el selector `CompanyPicker`: se elige la empresa y se ve
+qué tecnología tiene configurada (`QR` o `NFC`). Mientras hay una ronda en
+curso no se muestra el selector: la empresa queda fijada por la ronda abierta.
+
+1. **Iniciar Nueva Ronda** llama a `POST /rounds/start-new?company_id=<id>`. El
+   backend crea la ronda asignada al guardia y a la empresa elegida (o a la
+   primera empresa activa con puntos si no se envía `company_id`), con los
+   checkpoints activos de esa empresa, y la deja en `IN_PROGRESS`. La app abre
+   directamente `/scan` con el modo del escáner (`pointType`) según
+   `companies.point_type`. Si el guardia ya tiene una ronda en curso o pausada,
+   se le ofrece continuarla en lugar de crear otra.
    `GET /rounds/active` sigue disponible para restaurar la ronda abierta al
    entrar en `/rondas`.
 2. La pantalla activa muestra un cronómetro en tiempo real: parte del
@@ -109,20 +116,27 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
    descuenta el tiempo en pausa y recarga los puntos ya leídos. **Cancelar**
    (`POST /rounds/{id}/cancel`) exige un motivo. **Comentario** usa
    `POST /rounds/{id}/comments`.
-5. El botón **Escanear Checkpoint (QR)** abre `/scan`. La cámara lee el QR y la
-   app obtiene la ubicación con `expo-location` (`getCurrentPositionAsync`). El
-   escáner muestra el cronómetro de la ronda en tiempo real, alimentado por
-   `GET /rounds/active`.
-6. `POST /rounds/{id}/checkin` recibe
-   `{ qr_code, latitude, longitude, timestamp? }`. El backend valida que el
-   código exista, pertenezca a la empresa, no se haya marcado antes en la ronda
-   y que la ronda esté operativa. La validación de proximidad (geovalla del
-   punto, `geofence_radius_m`, 50 m por defecto) solo se aplica si
-   `ENFORCE_CHECKPOINT_GEOFENCE=true` en el backend; está desactivada por
-   defecto y la distancia se guarda igualmente en el log. `timestamp` es
-   opcional y permite conservar la hora real de una marcación que se sincroniza
-   más tarde. La respuesta incluye la distancia, el tiempo del tramo y si la
-   ronda quedó completa.
+5. El botón **Escanear Checkpoint (QR)** o **Leer Etiqueta NFC** (según
+   `point_type` de la empresa) abre `/scan` con el parámetro `pointType`. En modo
+   QR la cámara lee el código y la app obtiene la ubicación con
+   `expo-location` (`getCurrentPositionAsync`); en modo NFC la pantalla enciende
+   el lector (`react-native-nfc-manager`) y espera la etiqueta. Si el escáner se
+   abre sin `pointType` (enlace directo o vuelta desde otra pantalla), deduce el
+   modo de la caché de checkpoints: solo usa NFC cuando ningún punto de la ronda
+   es QR. No hay interruptor manual, porque cada empresa trabaja con una sola
+   tecnología. El escáner muestra el cronómetro de la ronda en tiempo real,
+   alimentado por `GET /rounds/active`.
+6. `POST /rounds/{id}/checkin` recibe `{ qr_code | nfc_uid, latitude?,
+   longitude?, timestamp? }`. El backend valida que el punto exista (por código
+   o por UID), pertenezca a la empresa, no se haya marcado antes en la ronda y
+   que la ronda esté operativa. Las marcaciones QR requieren coordenadas; las
+   NFC pueden enviarse sin GPS y se guardan con distancia 0. La validación de
+   proximidad (geovalla del punto, `geofence_radius_m`, 50 m por defecto) solo
+   se aplica si `ENFORCE_CHECKPOINT_GEOFENCE=true` en el backend; está
+   desactivada por defecto y la distancia se guarda igualmente en el log.
+   `timestamp` es opcional y permite conservar la hora real de una marcación que
+   se sincroniza más tarde. La respuesta incluye la distancia, el tiempo del
+   tramo y si la ronda quedó completa.
 7. Al marcar el último punto, el backend cierra la ronda como `COMPLETED`; el
    escáner y la pantalla activa felicitan al guardia y muestran el tiempo total.
 8. El historial (`GET /rounds/history`) lista por defecto las rondas de las
@@ -136,7 +150,8 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
 - `@react-native-community/netinfo` detecta la conectividad real. Si el guardia
   escanea sin red, o la petición falla por timeout/red, la marcación se guarda
   en una cola persistente de AsyncStorage (`src/services/offlineQueue.ts`) con
-  ronda, checkpoint, QR, coordenadas y la hora real del escaneo.
+  ronda, checkpoint, QR **o** UID NFC, coordenadas (opcionales en NFC) y la hora
+  real del escaneo.
 - El guardia ve una tarjeta de estado en **Inicio**, **Mis Rondas** e
   **Historial**: “Faltan X puntos por sincronizar. Se sincronizarán
   automáticamente al conectarse a internet”. El contador se actualiza tras cada
@@ -152,9 +167,10 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
   fallido con su mensaje; el guardia puede **Reintentar ahora** o descartarlo.
   Un `409` de “Ya registró el punto” se considera sincronizado para evitar
   duplicados.
-- `src/services/checkpointCache.ts` conserva los códigos de los checkpoints de
-  la ronda para poder asociar el QR a su `checkpoint_id` aunque el escáner se
-  abra sin señal.
+- `src/services/checkpointCache.ts` conserva el código, el `uid_nfc` y el
+  `point_type` de los checkpoints de la ronda para asociar la lectura (QR o NFC)
+  a su `checkpoint_id` aunque el escáner se abra sin señal, y para deducir el
+  modo del lector cuando la ronda se restaura desde el historial.
 - `POST /rounds/{id}/checkin` acepta `timestamp` opcional. El backend usa esa
   hora para el log, el cronómetro y la ventana de inactividad, de modo que un
   corte de red no cancela una ronda cuyas marcaciones ocurrieron a tiempo.
@@ -175,13 +191,21 @@ de **Mi ronda activa** (`/rondas`) y **Historial de rondas** (`/historial`).
 
 ### Permisos
 
-- `expo-camera` y `expo-location` se declaran en `app.json` mediante sus config
-  plugins, con mensajes en español para iOS/Android. Si cambia esos textos hay
-  que regenerar el build nativo (`npx expo run:android` / `eas build`); Expo Go
-  ya incluye ambos módulos.
+- `expo-camera`, `expo-location` y `react-native-nfc-manager` se declaran en
+  `app.json` mediante sus config plugins, con mensajes en español para iOS/Android
+  (`nfcPermission` para la etiqueta NFC). Si cambia esos textos hay que regenerar
+  el build nativo (`npx expo run:android` / `eas build`); Expo Go ya incluye
+  cámara y ubicación, pero **no** `react-native-nfc-manager`: para probar NFC
+  hace falta un development build o un APK.
 - Si el guardia deniega la cámara o la ubicación, la pantalla explica el motivo
-  y ofrece **Abrir ajustes**. Los errores de red o del backend se muestran en
-  una tarjeta con **Reintentar** y **Volver a la ronda**.
+  y ofrece **Abrir ajustes**. Si el dispositivo no tiene NFC, el lector está
+  desactivado o la etiqueta no se apoya a tiempo, el escáner muestra el motivo y
+  permite reintentar (**Volver a escanear**) o salir con **Volver a la ronda**;
+  cuando no hay lector NFC, el botón de lectura queda desactivado y el aviso
+  sugiere solicitar un punto con QR. Los rechazos del backend también aparecen
+  en esa tarjeta de error.
+- En web el servicio `nfc.web.ts` informa que no hay lector NFC y sugiere usar el
+  QR; el modo NFC no está disponible en el navegador.
 
 ### Build de Android en release (R8 y ML Kit)
 
@@ -206,6 +230,14 @@ problema reaparece en un APK release, comprobar que
   `IN_PROGRESS`).
 - El QR debe contener el **código** del punto (por ejemplo `QR-EMP1-PT01`), el
   mismo valor que muestra la pantalla de checkpoints.
+- Para NFC, configure la empresa con `point_type = "NFC"` y registre en cada
+  punto el UID de la etiqueta (`uid_nfc`, hexadecimal en mayúsculas sin
+  separadores; el backend acepta el UID con o sin `:`). Acercar la etiqueta al
+  dispositivo equivale a escanear el QR, sin necesidad de GPS.
+- Si el guardia tiene varias empresas, el selector de **Inicio** decide la
+  empresa y, con ella, el modo del escáner. Sin empresas activas asignadas, el
+  botón **Iniciar Nueva Ronda** queda deshabilitado con un aviso para contactar
+  al administrador.
 - Los puntos demo están geolocalizados en Madrid (`40.415462, -3.709687`, etc.).
   La marcación **no** exige cercanía al punto: `ENFORCE_CHECKPOINT_GEOFENCE`
   está desactivado por defecto. Para volver a exigir la geovalla, arranque el
@@ -213,7 +245,7 @@ problema reaparece en un APK release, comprobar que
   `geofence_radius_m`, máx. 1000 m, si desea otro radio).
 - La validación GPS requiere un dispositivo o un emulador con ubicación
   simulada. La vista web puede abrir la cámara, pero el permiso y la posición
-  dependen del navegador (y de HTTPS o `localhost`).
+  dependen del navegador (y de HTTPS o `localhost`); el NFC no funciona en web.
 
 ## Scripts
 

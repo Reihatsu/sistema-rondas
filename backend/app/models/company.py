@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.associations import user_companies
 from app.models.base import Base
+from app.models.enums import PointType, point_type_type
 
 
 class Company(Base):
@@ -21,6 +22,14 @@ class Company(Base):
     tax_id: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    #: Tecnología de identificación de los puntos: QR (impreso) o NFC (etiqueta).
+    point_type: Mapped[PointType] = mapped_column(
+        point_type_type,
+        nullable=False,
+        default=PointType.QR,
+        server_default=PointType.QR.value,
+        index=True,
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1", index=True
     )

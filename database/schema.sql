@@ -2,9 +2,13 @@
 -- Sistema de Rondas - Esquema de base de datos (MySQL 8+)
 -- ---------------------------------------------------------------------------
 -- Este script es equivalente al esquema generado por Alembic
--- (backend/alembic/versions/0001_initial_schema.py y 0002_checkpoints.py)
+-- (backend/alembic/versions/0001_initial_schema.py a 0005_point_types.py)
 -- y por los modelos SQLAlchemy. Úselo solo si prefiere inicializar la base de
 -- datos por SQL.
+--
+-- Cada empresa define el tipo de sus puntos de control (``point_type``): QR con
+-- código impreso o NFC con etiqueta física. El UID de la etiqueta se guarda en
+-- ``checkpoints.uid_nfc`` (hex en mayúsculas, sin separadores) y es único.
 --
 -- Uso (CLI):
 --   mysql -u root -p < database/schema.sql
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS `companies` (
     `tax_id`     VARCHAR(30)  NOT NULL,
     `address`    VARCHAR(255) NULL,
     `phone`      VARCHAR(30)  NULL,
+    `point_type` ENUM('QR', 'NFC') NOT NULL DEFAULT 'QR',
     `is_active`  TINYINT(1)   NOT NULL DEFAULT 1,
     `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -101,6 +106,7 @@ CREATE TABLE IF NOT EXISTS `checkpoints` (
     `company_id`           INT          NOT NULL,
     `name`                 VARCHAR(150) NOT NULL,
     `code`                 VARCHAR(100) NOT NULL,
+    `uid_nfc`              VARCHAR(100) NULL,
     `location_description` TEXT         NULL,
     `latitude`             FLOAT        NULL,
     `longitude`            FLOAT        NULL,
@@ -109,8 +115,10 @@ CREATE TABLE IF NOT EXISTS `checkpoints` (
     `created_at`           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uq_checkpoints_code` (`code`),
+    UNIQUE KEY `uq_checkpoints_uid_nfc` (`uid_nfc`),
     KEY `ix_checkpoints_company_id` (`company_id`),
     KEY `ix_checkpoints_is_active` (`is_active`),
+    KEY `ix_checkpoints_uid_nfc` (`uid_nfc`),
     CONSTRAINT `fk_checkpoints_company_id_companies`
         FOREIGN KEY (`company_id`) REFERENCES `companies` (`id`) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

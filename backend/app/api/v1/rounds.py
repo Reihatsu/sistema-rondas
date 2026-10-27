@@ -1,14 +1,16 @@
-"""Endpoints de Rondas: ciclo de vida, historial, comentarios y marcación QR.
+"""Endpoints de Rondas: ciclo de vida, historial, comentarios y marcación QR/NFC.
 
 Cubre el flujo operativo completo del guardia:
 
 * Consulta de la ronda activa, de sus checkpoints y del historial.
-* Creación e inicio directo de una ronda nueva por parte del guardia.
+* Creación e inicio directo de una ronda nueva por parte del guardia, eligiendo
+  la empresa (QR o NFC) desde la app móvil.
 * Inicio de rondas asignadas, pausa (con motivo obligatorio), reanudación y
   cancelación.
-* Marcación por QR con ubicación GPS, tiempos por tramo y cierre automático
-  de la ronda al visitar el último checkpoint. La proximidad al punto solo se
-  exige si ``ENFORCE_CHECKPOINT_GEOFENCE`` está activo.
+* Marcación por QR (código impreso + GPS) o por NFC (UID de la etiqueta, con
+  GPS opcional), tiempos por tramo y cierre automático de la ronda al visitar
+  el último checkpoint. La proximidad al punto solo se exige si
+  ``ENFORCE_CHECKPOINT_GEOFENCE`` está activo.
 * Cancelación automática cuando pasan más de
   ``ROUND_INACTIVITY_TIMEOUT_MINUTES`` minutos sin actividad.
 """
@@ -238,10 +240,13 @@ def _to_round_checkpoint(
 ) -> RoundCheckpointRead:
     """Combina un punto de control con su estado de visita en la ronda."""
     visited = visited_at is not None
+    company = checkpoint.company
     return RoundCheckpointRead(
         id=checkpoint.id,
         name=checkpoint.name,
         code=checkpoint.code,
+        uid_nfc=checkpoint.uid_nfc,
+        point_type=company.point_type if company is not None else None,
         location_description=checkpoint.location_description,
         latitude=checkpoint.latitude,
         longitude=checkpoint.longitude,
@@ -256,6 +261,22 @@ def _to_round_checkpoint(
         elapsed_seconds=elapsed_seconds,
         segment_seconds=segment_seconds,
     )
+
+
+def _lookup_checkpoint(
+    db: DbSession,
+    payload: RoundCheckInCreate,
+) -> Checkpoint | None:
+    """Resuelve el punto marcado según el identificador enviado.
+
+    El UID NFC ya llega normalizado por el esquema (hex en mayúsculas y sin
+    separadores), igual que se guarda en la base de datos.
+    """
+    if payload.nfc_uid is not None:
+        return crud_checkpoint.get_checkpoint_by_uid(db, payload.nfc_uid)
+    if payload.qr_code is not None:
+        return crud_checkpoint.get_checkpoint_by_code(db, payload.qr_code)
+    return None
 
 
 @router.get("", response_model=Paginated[RoundRead], summary="Listar rondas")
@@ -372,6 +393,14 @@ def get_active_round(
 def start_new_round(
     db: DbSession,
     current_user: CurrentUser,
+    company_id: int | None = Query(
+        None,
+        ge=1,
+        description=(
+            "Empresa de la ronda. Si se omite se usa la primera empresa activa "
+            "asignada al guardia que tenga checkpoints activos."
+        ),
+    ),
 ) -> RoundDetail:
     """Crea una ronda en curso asignada al guardia autenticado.
 
@@ -385,8 +414,8 @@ def start_new_round(
       ``409`` con su identificador para que el cliente continúe esa ronda.
       Una ronda en curso que superó la ventana de inactividad se cancela y no
       bloquea la creación de la nueva.
-    * La empresa se toma de las empresas activas asignadas al guardia. Si
-      ninguna tiene checkpoints activos se responde ``400``.
+    * ``company_id`` es opcional: el selector de empresa de la app móvil envía
+      la empresa elegida. Debe estar activa y asignada al guardia.
     * La ronda se crea directamente en ``IN_PROGRESS`` con el cronómetro
       iniciado. Su recorrido son los checkpoints activos de la empresa, que se
       consultan con ``GET /rounds/{id}/checkpoints``.
@@ -427,17 +456,42 @@ def start_new_round(
             ),
         )
 
-    # Se elige la primera empresa activa que tenga puntos operativos.
+    # Se elige la empresa indicada por el cliente o, si no se envía, la primera
+    # empresa activa que tenga puntos operativos.
     company = None
     checkpoints: list[Checkpoint] = []
-    for candidate in companies:
-        candidate_checkpoints = crud_checkpoint.list_active_by_company(
-            db, candidate.id
+    if company_id is not None:
+        company = next(
+            (candidate for candidate in companies if candidate.id == company_id),
+            None,
         )
-        if candidate_checkpoints:
-            company = candidate
-            checkpoints = candidate_checkpoints
-            break
+        if company is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "No tiene acceso a la empresa indicada o está desactivada. "
+                    "Solicite al administrador que le asigne esa empresa."
+                ),
+            )
+
+        checkpoints = crud_checkpoint.list_active_by_company(db, company.id)
+        if not checkpoints:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"La empresa «{company.name}» no tiene checkpoints activos. "
+                    "Solicite al administrador que configure los puntos de control."
+                ),
+            )
+    else:
+        for candidate in companies:
+            candidate_checkpoints = crud_checkpoint.list_active_by_company(
+                db, candidate.id
+            )
+            if candidate_checkpoints:
+                company = candidate
+                checkpoints = candidate_checkpoints
+                break
 
     if company is None:
         raise HTTPException(
@@ -692,7 +746,7 @@ def list_round_checkpoints(
     "/{round_id}/checkin",
     response_model=RoundCheckInRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Registrar la marcación de un checkpoint por QR",
+    summary="Registrar la marcación de un checkpoint por QR o NFC",
 )
 def register_checkin(
     round_id: int,
@@ -700,18 +754,20 @@ def register_checkin(
     db: DbSession,
     current_user: CurrentUser,
 ) -> RoundCheckInRead:
-    """Valida el QR, la ubicación y registra la marcación del guardia.
+    """Valida el QR/UID NFC, la ubicación y registra la marcación del guardia.
 
     Reglas aplicadas:
 
     * Solo el guardia asignado puede marcar checkpoints de su ronda.
     * Si la ronda está pendiente, la primera marcación la inicia; una ronda
       pausada, completada o cancelada no admite marcaciones.
-    * El código leído debe existir, estar activo y pertenecer a la empresa de
-      la ronda.
-    * El punto debe tener coordenadas configuradas; con
-      ``ENFORCE_CHECKPOINT_GEOFENCE`` activo el dispositivo además debe estar
-      dentro del radio de la geovalla.
+    * El punto se resuelve por ``qr_code`` o por ``nfc_uid``; debe existir,
+      estar activo y pertenecer a la empresa de la ronda.
+    * Las marcaciones por QR exigen coordenadas del punto y del dispositivo;
+      con ``ENFORCE_CHECKPOINT_GEOFENCE`` activo el dispositivo debe estar
+      dentro del radio de la geovalla. Las marcaciones NFC pueden llegar sin
+      GPS (se registran con distancia 0) y su geovalla solo se evalúa si el
+      dispositivo envía coordenadas.
     * Un punto no puede marcarse dos veces en la misma ronda.
     * Si supera la ventana de inactividad, la ronda se cancela y se devuelve
       un 409 con el motivo para que la app muestre la alerta.
@@ -753,9 +809,7 @@ def register_checkin(
         RoundStatus.COMPLETED,
         RoundStatus.CANCELLED,
     ):
-        existing_checkpoint = crud_checkpoint.get_checkpoint_by_code(
-            db, payload.qr_code
-        )
+        existing_checkpoint = _lookup_checkpoint(db, payload)
         if existing_checkpoint is not None:
             existing_log = crud_round.get_round_log_for_checkpoint(
                 db, round_id, existing_checkpoint.id
@@ -780,14 +834,22 @@ def register_checkin(
             detail="La ronda ya está cerrada y no admite nuevas marcaciones.",
         )
 
-    checkpoint = crud_checkpoint.get_checkpoint_by_code(db, payload.qr_code)
+    checkpoint = _lookup_checkpoint(db, payload)
     if checkpoint is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
+        if payload.nfc_uid is not None:
+            detail = (
+                "El UID de la etiqueta NFC no corresponde a ningún punto de "
+                "control de esta empresa. Verifique que acercó la etiqueta "
+                "correcta y que está registrada en el sistema."
+            )
+        else:
+            detail = (
                 "El código QR no corresponde a ningún punto de control. "
                 "Verifique que escaneó la etiqueta correcta."
-            ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=detail,
         )
     if checkpoint.company_id != round_obj.company_id:
         raise HTTPException(
@@ -799,7 +861,16 @@ def register_checkin(
             status_code=status.HTTP_409_CONFLICT,
             detail="El punto de control está desactivado.",
         )
-    if checkpoint.latitude is None or checkpoint.longitude is None:
+
+    # Las marcaciones por QR siempre traen GPS y el punto debe tener una
+    # geovalla configurada. Por NFC el GPS es opcional: si falta, se registra
+    # la marcación con distancia 0 (la etiqueta física ya prueba la presencia).
+    has_device_coordinates = (
+        payload.latitude is not None and payload.longitude is not None
+    )
+    if payload.qr_code is not None and (
+        checkpoint.latitude is None or checkpoint.longitude is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -808,17 +879,27 @@ def register_checkin(
             ),
         )
 
-    distance = haversine_distance_m(
-        payload.latitude,
-        payload.longitude,
-        checkpoint.latitude,
-        checkpoint.longitude,
-    )
+    distance = 0.0
+    if has_device_coordinates and (
+        checkpoint.latitude is not None and checkpoint.longitude is not None
+    ):
+        assert payload.latitude is not None and payload.longitude is not None
+        distance = haversine_distance_m(
+            payload.latitude,
+            payload.longitude,
+            checkpoint.latitude,
+            checkpoint.longitude,
+        )
+
     # La proximidad solo se exige cuando ``ENFORCE_CHECKPOINT_GEOFENCE`` está
     # activo. Desactivada, la distancia se sigue calculando y guardando en el
     # log, pero una marcación lejana no bloquea el registro.
     radius = checkpoint.geofence_radius_m or settings.DEFAULT_GEOFENCE_RADIUS_M
-    if settings.ENFORCE_CHECKPOINT_GEOFENCE and distance > radius:
+    if (
+        settings.ENFORCE_CHECKPOINT_GEOFENCE
+        and has_device_coordinates
+        and distance > radius
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -867,7 +948,9 @@ def register_checkin(
     log = RoundLog(
         round_id=round_obj.id,
         checkpoint_id=checkpoint.id,
-        nfc_tag_id=checkpoint.code,
+        # Para puntos NFC se guarda el UID físico de la etiqueta leída; los
+        # puntos QR siguen guardando el código escaneado.
+        nfc_tag_id=checkpoint.uid_nfc or checkpoint.code,
         checkpoint_name=checkpoint.name,
         latitude=payload.latitude,
         longitude=payload.longitude,

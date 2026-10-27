@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Download,
   MapPin,
+  Nfc,
   Pencil,
   Plus,
   Power,
@@ -25,16 +26,36 @@ import {
   cn,
 } from "../components/ui";
 import { checkpointsApi, companiesApi, getErrorMessage } from "../services/api";
-import { formatDate } from "../utils/format";
+import { POINT_TYPE_LABELS, formatDate } from "../utils/format";
 
 const PAGE_SIZE = 10;
+const DEFAULT_GEOFENCE_METERS = 50;
 const EMPTY_FORM = {
   company_id: "",
   name: "",
   code: "",
+  uid_nfc: "",
   location_description: "",
+  latitude: "",
+  longitude: "",
+  geofence_radius_m: String(DEFAULT_GEOFENCE_METERS),
   is_active: true,
 };
+
+/** Canoniza el UID igual que el backend: mayúsculas y sin separadores. */
+function normalizeNfcUid(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, "");
+}
+
+/** Convierte un número del formulario a ``number | null``. */
+function toNumberOrNull(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return null;
+  const parsed = Number(text.replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => {
@@ -84,6 +105,16 @@ export default function Checkpoints() {
   const [qrTarget, setQrTarget] = useState(null);
   const [qrError, setQrError] = useState("");
   const qrCanvasRef = useRef(null);
+
+  // La empresa seleccionada define la tecnología del punto: QR (código
+  // impreso) o NFC (etiqueta física con UID).
+  const selectedCompany = companies.find(
+    (company) => String(company.id) === form.company_id,
+  );
+  const pointType =
+    selectedCompany?.point_type || editing?.company?.point_type || "QR";
+  const isNfcPoint = pointType === "NFC";
+  const codePlaceholder = `${pointType}-EMP${form.company_id || "ID"}-PT01`;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -156,7 +187,19 @@ export default function Checkpoints() {
       company_id: String(checkpoint.company_id),
       name: checkpoint.name,
       code: checkpoint.code,
+      uid_nfc: checkpoint.uid_nfc || "",
       location_description: checkpoint.location_description || "",
+      latitude:
+        checkpoint.latitude === null || checkpoint.latitude === undefined
+          ? ""
+          : String(checkpoint.latitude),
+      longitude:
+        checkpoint.longitude === null || checkpoint.longitude === undefined
+          ? ""
+          : String(checkpoint.longitude),
+      geofence_radius_m: String(
+        checkpoint.geofence_radius_m ?? DEFAULT_GEOFENCE_METERS,
+      ),
       is_active: checkpoint.is_active,
     });
     setFormError("");
@@ -178,14 +221,45 @@ export default function Checkpoints() {
       return;
     }
 
+    const uidNfc = normalizeNfcUid(form.uid_nfc);
+    if (isNfcPoint && !uidNfc) {
+      setFormError(
+        "Esta empresa usa etiquetas NFC: indique el UID de la etiqueta del punto.",
+      );
+      return;
+    }
+
+    const latitude = toNumberOrNull(form.latitude);
+    const longitude = toNumberOrNull(form.longitude);
+    if (!isNfcPoint && (latitude === null || longitude === null)) {
+      setFormError(
+        "Las coordenadas son obligatorias para validar las marcaciones por QR.",
+      );
+      return;
+    }
+
+    const radius = toNumberOrNull(form.geofence_radius_m);
+
     setSaving(true);
     setFormError("");
     const payload = {
       company_id: Number(form.company_id),
       name: form.name.trim(),
-      code: form.code.trim().toUpperCase(),
       location_description: form.location_description.trim() || null,
+      latitude,
+      longitude,
+      geofence_radius_m: radius ?? DEFAULT_GEOFENCE_METERS,
+      uid_nfc: isNfcPoint ? uidNfc : null,
     };
+
+    // El código es opcional: al dejarlo vacío el servidor asigna el siguiente
+    // disponible (QR-EMP1-PT01 / NFC-EMP2-PT01). Al editar se conserva el actual.
+    const code = form.code.trim().toUpperCase();
+    if (code) {
+      payload.code = code;
+    } else if (!editing) {
+      payload.code = null;
+    }
 
     try {
       if (editing) {
@@ -422,7 +496,7 @@ export default function Checkpoints() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Código</th>
+                <th>Identificador</th>
                 <th>Punto de control</th>
                 <th>Empresa</th>
                 <th>Estado</th>
@@ -473,10 +547,24 @@ export default function Checkpoints() {
                 items.map((checkpoint) => (
                   <tr key={checkpoint.id}>
                     <td>
-                      <span className="inline-flex items-center gap-1.5 rounded bg-slate-100 px-2 py-1 font-mono text-[11px] font-semibold text-slate-700">
-                        <QrCode className="h-3 w-3" aria-hidden="true" />
-                        {checkpoint.code}
-                      </span>
+                      <div className="min-w-[150px]">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-slate-100 px-2 py-1 font-mono text-[11px] font-semibold text-slate-700">
+                          {checkpoint.uid_nfc ? (
+                            <Nfc className="h-3 w-3" aria-hidden="true" />
+                          ) : (
+                            <QrCode className="h-3 w-3" aria-hidden="true" />
+                          )}
+                          {checkpoint.code}
+                        </span>
+                        {checkpoint.uid_nfc ? (
+                          <p
+                            className="mt-1 truncate font-mono text-[10px] text-slate-500"
+                            title={`UID NFC ${checkpoint.uid_nfc}`}
+                          >
+                            UID {checkpoint.uid_nfc}
+                          </p>
+                        ) : null}
+                      </div>
                     </td>
                     <td>
                       <div className="min-w-[220px]">
@@ -494,6 +582,10 @@ export default function Checkpoints() {
                         {checkpoint.company?.name ||
                           `Empresa #${checkpoint.company_id}`}
                       </Badge>
+                      <span className="mt-1 block text-[10px] uppercase tracking-wide text-slate-400">
+                        {POINT_TYPE_LABELS[checkpoint.company?.point_type] ||
+                          (checkpoint.uid_nfc ? POINT_TYPE_LABELS.NFC : POINT_TYPE_LABELS.QR)}
+                      </span>
                     </td>
                     <td>
                       <Badge tone={checkpoint.is_active ? "success" : "neutral"}>
@@ -505,15 +597,17 @@ export default function Checkpoints() {
                     </td>
                     <td className="cell-actions">
                       <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-icon"
-                          onClick={() => openQr(checkpoint)}
-                          title="Ver / imprimir código QR"
-                          aria-label={`Ver código QR de ${checkpoint.name}`}
-                        >
-                          <QrCode className="h-4 w-4" aria-hidden="true" />
-                        </button>
+                        {checkpoint.uid_nfc ? null : (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-icon"
+                            onClick={() => openQr(checkpoint)}
+                            title="Ver / imprimir código QR"
+                            aria-label={`Ver código QR de ${checkpoint.name}`}
+                          >
+                            <QrCode className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        )}
                         {canManage ? (
                           <>
                             <button
@@ -575,7 +669,11 @@ export default function Checkpoints() {
         <Modal
           icon={MapPin}
           title={editing ? "Editar punto de control" : "Nuevo punto de control"}
-          subtitle="El código se utiliza para generar el QR/NFC y debe ser único en el sistema."
+          subtitle={
+            isNfcPoint
+              ? "Esta empresa usa etiquetas NFC: registre el UID de la etiqueta física del punto."
+              : "Esta empresa usa códigos QR: el sistema puede generar el código automáticamente."
+          }
           onClose={closeModal}
           footer={
             <>
@@ -633,6 +731,18 @@ export default function Checkpoints() {
                   </option>
                 ))}
               </select>
+              {selectedCompany ? (
+                <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
+                  {isNfcPoint ? (
+                    <Nfc className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  {isNfcPoint
+                    ? "Puntos con etiqueta NFC: se solicita el UID físico."
+                    : "Puntos con código QR: se solicita el código impreso."}
+                </p>
+              ) : null}
               {companies.length === 0 && !companiesError ? (
                 <p className="mt-1 text-xs text-amber-600">
                   No hay empresas asignadas a su usuario.
@@ -665,12 +775,11 @@ export default function Checkpoints() {
 
             <div>
               <label htmlFor="checkpoint-code" className="label">
-                Código único *
+                Código único
               </label>
               <input
                 id="checkpoint-code"
                 type="text"
-                required
                 minLength={2}
                 maxLength={100}
                 value={form.code}
@@ -683,14 +792,117 @@ export default function Checkpoints() {
                   }))
                 }
                 className="input font-mono uppercase"
-                placeholder="QR-EMP1-PT01"
+                placeholder={codePlaceholder}
                 autoComplete="off"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Este valor se codifica en el QR y puede vincularse a una etiqueta
-                NFC.
+                {editing
+                  ? "Se conserva el código actual si lo deja vacío."
+                  : `Opcional: si lo deja vacío, el sistema asigna el siguiente disponible (${codePlaceholder}).`}
               </p>
             </div>
+
+            {isNfcPoint ? (
+              <div>
+                <label htmlFor="checkpoint-uid" className="label">
+                  UID de la etiqueta NFC *
+                </label>
+                <input
+                  id="checkpoint-uid"
+                  type="text"
+                  required
+                  maxLength={100}
+                  value={form.uid_nfc}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      uid_nfc: normalizeNfcUid(event.target.value),
+                    }))
+                  }
+                  className="input font-mono uppercase tracking-wider"
+                  placeholder="04A23B4C5D6E80"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  Hex en mayúsculas y sin separadores; se limpian los dos puntos
+                  automáticamente. Debe ser único en todo el sistema.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <label htmlFor="checkpoint-latitude" className="label">
+                  Latitud {isNfcPoint ? "" : "*"}
+                </label>
+                <input
+                  id="checkpoint-latitude"
+                  type="number"
+                  step="any"
+                  min={-90}
+                  max={90}
+                  required={!isNfcPoint}
+                  value={form.latitude}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      latitude: event.target.value,
+                    }))
+                  }
+                  className="input"
+                  placeholder="40.4168"
+                />
+              </div>
+              <div>
+                <label htmlFor="checkpoint-longitude" className="label">
+                  Longitud {isNfcPoint ? "" : "*"}
+                </label>
+                <input
+                  id="checkpoint-longitude"
+                  type="number"
+                  step="any"
+                  min={-180}
+                  max={180}
+                  required={!isNfcPoint}
+                  value={form.longitude}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      longitude: event.target.value,
+                    }))
+                  }
+                  className="input"
+                  placeholder="-3.7038"
+                />
+              </div>
+              <div>
+                <label htmlFor="checkpoint-radius" className="label">
+                  Radio (m)
+                </label>
+                <input
+                  id="checkpoint-radius"
+                  type="number"
+                  min={10}
+                  max={1000}
+                  step={5}
+                  required
+                  value={form.geofence_radius_m}
+                  onChange={(event) =>
+                    setForm((previous) => ({
+                      ...previous,
+                      geofence_radius_m: event.target.value,
+                    }))
+                  }
+                  className="input"
+                />
+              </div>
+            </div>
+            <p className="-mt-1 text-xs text-slate-500">
+              {isNfcPoint
+                ? "En puntos NFC las coordenadas son opcionales: la etiqueta física confirma la ubicación."
+                : "Las coordenadas son obligatorias en puntos QR porque el móvil valida la distancia al marcar."}
+            </p>
 
             <div>
               <label htmlFor="checkpoint-location" className="label">

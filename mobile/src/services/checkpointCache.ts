@@ -1,14 +1,16 @@
 /**
  * Caché local de los checkpoints de una ronda.
  *
- * El escáner necesita traducir el código QR a `checkpoint_id` para poder
- * guardar la marcación offline. `listRoundCheckpoints` requiere red, así que
- * `RondasScreen` guarda una copia compacta y el escáner la usa como respaldo.
+ * El escáner necesita traducir el código QR (o el UID de la etiqueta NFC) a
+ * `checkpoint_id` para poder guardar la marcación offline. `listRoundCheckpoints`
+ * requiere red, así que `RondasScreen` guarda una copia compacta y el escáner la
+ * usa como respaldo.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import type { RoundCheckpoint } from '@/api/types';
+import type { PointType, RoundCheckpoint } from '@/api/types';
+import { canonicalNfcUid } from '@/services/nfcUid';
 
 const STORAGE_KEY_PREFIX = 'sistema-rondas.round-checkpoints.v1.';
 
@@ -16,10 +18,18 @@ export interface CachedRoundCheckpoint {
   id: number;
   name: string;
   code: string;
+  /** UID de la etiqueta NFC; `null` en puntos QR. */
+  uid_nfc: string | null;
+  /** Tecnología del punto; `null` si el backend no la informa. */
+  point_type: PointType | null;
 }
 
 function getStorageKey(roundId: number): string {
   return `${STORAGE_KEY_PREFIX}${roundId}`;
+}
+
+function toPointType(value: unknown): PointType | null {
+  return value === 'QR' || value === 'NFC' ? value : null;
 }
 
 function toCachedCheckpoint(value: unknown): CachedRoundCheckpoint | null {
@@ -31,12 +41,21 @@ function toCachedCheckpoint(value: unknown): CachedRoundCheckpoint | null {
   const id = Number(record.id);
   const name = typeof record.name === 'string' ? record.name : '';
   const code = typeof record.code === 'string' ? record.code : '';
+  const uid = canonicalNfcUid(
+    typeof record.uid_nfc === 'string' ? record.uid_nfc : null,
+  );
 
   if (!Number.isInteger(id) || id <= 0 || !code.trim()) {
     return null;
   }
 
-  return { id, name: name || code, code: code.trim().toUpperCase() };
+  return {
+    id,
+    name: name || code,
+    code: code.trim().toUpperCase(),
+    uid_nfc: uid || null,
+    point_type: toPointType(record.point_type),
+  };
 }
 
 /** Guarda los puntos de la ronda para futuras marcaciones sin conexión. */
@@ -52,6 +71,8 @@ export async function cacheRoundCheckpoints(
     id: checkpoint.id,
     name: checkpoint.name,
     code: checkpoint.code.trim().toUpperCase(),
+    uid_nfc: canonicalNfcUid(checkpoint.uid_nfc) || null,
+    point_type: checkpoint.point_type ?? null,
   }));
 
   try {

@@ -20,6 +20,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { getErrorMessage } from '@/api/client';
 import { checkIn } from '@/api/rounds';
+import { canonicalNfcUid } from '@/services/nfcUid';
 
 export const OFFLINE_QUEUE_STORAGE_KEY = 'sistema-rondas.offline-queue.v1';
 
@@ -35,9 +36,13 @@ export interface QueuedCheckIn {
   /** `null` solo si el checkpoint no pudo resolverse desde la caché local. */
   checkpoint_id: number | null;
   checkpoint_name: string;
-  qr_code: string;
-  latitude: number;
-  longitude: number;
+  /** Contenido leído del QR; `null` en las marcaciones NFC. */
+  qr_code: string | null;
+  /** UID de la etiqueta NFC; `null` en las marcaciones QR. */
+  nfc_uid: string | null;
+  /** `null` en las marcaciones NFC sin GPS disponible. */
+  latitude: number | null;
+  longitude: number | null;
   /** Instante real de la marcación en el dispositivo (ISO 8601). */
   timestamp: string;
   /** Instante en que se encoló (ISO 8601). */
@@ -52,9 +57,13 @@ export interface EnqueueCheckInInput {
   round_id: number;
   checkpoint_id?: number | null;
   checkpoint_name?: string | null;
-  qr_code: string;
-  latitude: number;
-  longitude: number;
+  /** Contenido del código QR. Obligatorio si no se envía `nfc_uid`. */
+  qr_code?: string | null;
+  /** UID leído de la etiqueta NFC. Obligatorio si no se envía `qr_code`. */
+  nfc_uid?: string | null;
+  /** Obligatoria para marcaciones QR; opcional para NFC. */
+  latitude?: number | null;
+  longitude?: number | null;
   /** Por defecto, el instante actual. */
   timestamp?: string;
 }
@@ -132,6 +141,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -145,7 +158,13 @@ function normalizeStoredItem(value: unknown): QueuedCheckIn | null {
   const roundId = toFiniteNumber(value.round_id);
   const latitude = toFiniteNumber(value.latitude);
   const longitude = toFiniteNumber(value.longitude);
-  const qrCode = typeof value.qr_code === 'string' ? value.qr_code.trim() : '';
+  const qrCode =
+    typeof value.qr_code === 'string' ? value.qr_code.trim().toUpperCase() : '';
+  const nfcUid = canonicalNfcUid(
+    typeof value.nfc_uid === 'string' ? value.nfc_uid : null,
+  );
+  const hasCoordinates =
+    latitude !== null && longitude !== null && isValidCoordinate(latitude, longitude);
 
   if (
     userId === null ||
@@ -154,9 +173,9 @@ function normalizeStoredItem(value: unknown): QueuedCheckIn | null {
     roundId === null ||
     !Number.isInteger(roundId) ||
     roundId <= 0 ||
-    latitude === null ||
-    longitude === null ||
-    !qrCode
+    (!qrCode && !nfcUid) ||
+    // El QR exige coordenadas (geovalla); el NFC puede marcarse sin GPS.
+    (qrCode !== '' && !hasCoordinates)
   ) {
     return null;
   }
@@ -178,10 +197,11 @@ function normalizeStoredItem(value: unknown): QueuedCheckIn | null {
     checkpoint_name:
       typeof value.checkpoint_name === 'string' && value.checkpoint_name.trim()
         ? value.checkpoint_name.trim()
-        : qrCode,
-    qr_code: qrCode.toUpperCase(),
-    latitude,
-    longitude,
+        : qrCode || (nfcUid ? `NFC ${nfcUid}` : 'Punto de control'),
+    qr_code: qrCode || null,
+    nfc_uid: nfcUid || null,
+    latitude: hasCoordinates ? latitude : null,
+    longitude: hasCoordinates ? longitude : null,
     timestamp: timestamp || now,
     queued_at: queuedAt || now,
     status: value.status === 'failed' ? 'failed' : 'pending',
@@ -258,25 +278,36 @@ function isValidCoordinate(latitude: number, longitude: number): boolean {
 /**
  * Guarda una marcación en la cola local.
  *
- * Es idempotente por `user_id + round_id + qr_code`: si el guardia vuelve a
- * escanear el mismo punto sin conexión, no se duplica el elemento.
+ * Es idempotente por `user_id + round_id + identificador` (código QR o UID NFC):
+ * si el guardia vuelve a escanear el mismo punto sin conexión, no se duplica el
+ * elemento.
  */
 export async function enqueueCheckIn(
   input: EnqueueCheckInInput,
 ): Promise<QueuedCheckIn> {
-  const qrCode = input.qr_code.trim().toUpperCase();
+  const qrCode =
+    typeof input.qr_code === 'string' ? input.qr_code.trim().toUpperCase() : '';
+  const nfcUid = canonicalNfcUid(input.nfc_uid);
+  const latitude = typeof input.latitude === 'number' ? input.latitude : null;
+  const longitude = typeof input.longitude === 'number' ? input.longitude : null;
+  const hasCoordinates =
+    latitude !== null && longitude !== null && isValidCoordinate(latitude, longitude);
 
   if (
     !Number.isInteger(input.user_id) ||
     input.user_id <= 0 ||
     !Number.isInteger(input.round_id) ||
     input.round_id <= 0 ||
-    !qrCode
+    (!qrCode && !nfcUid)
   ) {
     throw new Error('La marcación no tiene datos suficientes para guardarse.');
   }
 
-  if (!isValidCoordinate(input.latitude, input.longitude)) {
+  // El QR exige coordenadas para validar la geovalla; el NFC puede guardarse
+  // sin GPS, pero si llegan coordenadas deben ser válidas.
+  const coordinatesSent = latitude !== null || longitude !== null;
+
+  if ((qrCode && !hasCoordinates) || (!qrCode && coordinatesSent && !hasCoordinates)) {
     throw new Error('La ubicación capturada no es válida para guardar la marcación.');
   }
 
@@ -301,7 +332,7 @@ export async function enqueueCheckIn(
       (item) =>
         item.user_id === input.user_id &&
         item.round_id === input.round_id &&
-        item.qr_code === qrCode,
+        (qrCode !== '' ? item.qr_code === qrCode : item.nfc_uid === nfcUid),
     );
 
     if (existing) {
@@ -313,8 +344,8 @@ export async function enqueueCheckIn(
           checkpoint_id: checkpointId ?? existing.checkpoint_id,
           checkpoint_name:
             input.checkpoint_name?.trim() || existing.checkpoint_name,
-          latitude: input.latitude,
-          longitude: input.longitude,
+          latitude: hasCoordinates ? latitude : null,
+          longitude: hasCoordinates ? longitude : null,
           timestamp,
           queued_at: now,
           status: 'pending',
@@ -336,10 +367,14 @@ export async function enqueueCheckIn(
       user_id: input.user_id,
       round_id: input.round_id,
       checkpoint_id: checkpointId,
-      checkpoint_name: input.checkpoint_name?.trim() || qrCode,
-      qr_code: qrCode,
-      latitude: input.latitude,
-      longitude: input.longitude,
+      checkpoint_name:
+        input.checkpoint_name?.trim() ||
+        qrCode ||
+        (nfcUid ? `NFC ${nfcUid}` : 'Punto de control'),
+      qr_code: qrCode || null,
+      nfc_uid: nfcUid || null,
+      latitude: hasCoordinates ? latitude : null,
+      longitude: hasCoordinates ? longitude : null,
       timestamp,
       queued_at: now,
       status: 'pending',
@@ -552,7 +587,8 @@ async function runFlush(userId: number): Promise<FlushOfflineQueueResult> {
 
     try {
       await checkIn(current.round_id, {
-        qr_code: current.qr_code,
+        qr_code: current.qr_code ?? undefined,
+        nfc_uid: current.nfc_uid ?? undefined,
         latitude: current.latitude,
         longitude: current.longitude,
         timestamp: current.timestamp,

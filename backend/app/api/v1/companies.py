@@ -12,6 +12,7 @@ from app.api.deps import (
     ensure_company_access,
     user_company_ids,
 )
+from app.crud import checkpoint as crud_checkpoint
 from app.crud import company as crud_company
 from app.models import UserRole
 from app.schemas.common import Message, Paginated
@@ -142,6 +143,7 @@ def update_company(
             )
 
     try:
+        previous_point_type = company.point_type
         company = crud_company.update_company(db, company, payload)
     except IntegrityError:
         db.rollback()
@@ -149,6 +151,17 @@ def update_company(
             status_code=status.HTTP_409_CONFLICT,
             detail="Conflicto de unicidad al actualizar la empresa",
         ) from None
+
+    # Al cambiar la tecnología de la empresa, los puntos del tipo anterior
+    # dejan de ser operativos: la ronda se arma solo con los que se pueden
+    # marcar con la tecnología configurada.
+    if (
+        payload.point_type is not None
+        and payload.point_type is not previous_point_type
+    ):
+        crud_checkpoint.deactivate_opposite_point_type(
+            db, company.id, company.point_type
+        )
 
     return CompanyRead.model_validate(company)
 

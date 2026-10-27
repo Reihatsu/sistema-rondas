@@ -21,6 +21,7 @@ Cuentas creadas (solo para desarrollo/demo)::
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -31,6 +32,7 @@ from app.core.security import hash_password
 from app.models import (
     Checkpoint,
     Company,
+    PointType,
     Round,
     RoundLog,
     RoundLogStatus,
@@ -41,14 +43,28 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
-#: Empresa única de demostración.
+#: Empresa de demostración con puntos identificados por código QR.
 DEMO_COMPANY: dict[str, Any] = {
     "name": "Empresa Demo S.A.",
     "tax_id": "B12345678",
     "address": "Calle Mayor 10, 28013 Madrid",
     "phone": "+34 910 000 000",
+    "point_type": PointType.QR,
     "is_active": True,
 }
+
+#: Segunda empresa demo: sus puntos se marcan acercando una etiqueta NFC.
+DEMO_NFC_COMPANY: dict[str, Any] = {
+    "name": "Empresa NFC Demo S.L.",
+    "tax_id": "B87654321",
+    "address": "Avenida del Puerto 24, 46011 Valencia",
+    "phone": "+34 960 111 222",
+    "point_type": PointType.NFC,
+    "is_active": True,
+}
+
+#: Empresas demo sembradas por el seed.
+DEMO_COMPANIES: tuple[dict[str, Any], ...] = (DEMO_COMPANY, DEMO_NFC_COMPANY)
 
 #: Puntos de control demo de la empresa. El código es global y único.
 DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
@@ -81,6 +97,45 @@ DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
         "latitude": 40.414700,
         "longitude": -3.709500,
         "geofence_radius_m": 50,
+    },
+)
+
+#: Puntos NFC demo. ``uid_nfc`` es el UID físico de la etiqueta; se guarda
+#: normalizado (hex en mayúsculas y sin separadores). La numeración de los
+#: códigos corresponde a una base recién sembrada, donde esta es la empresa 2.
+DEMO_NFC_CHECKPOINTS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "Portal Marítimo",
+        "code": "NFC-EMP2-PT01",
+        "uid_nfc": "04A23B4C5D6E80",
+        "location_description": (
+            "Torno peatonal del portal marítimo, junto al control de accesos."
+        ),
+        "latitude": 39.464100,
+        "longitude": -0.331500,
+        "geofence_radius_m": 50,
+    },
+    {
+        "name": "Muelle de Carga",
+        "code": "NFC-EMP2-PT02",
+        "uid_nfc": "04B34C5D6E7F91",
+        "location_description": (
+            "Etiqueta adherida a la columna 4 del muelle de carga, sector norte."
+        ),
+        "latitude": 39.463400,
+        "longitude": -0.330900,
+        "geofence_radius_m": 40,
+    },
+    {
+        "name": "Cuarto de Máquinas",
+        "code": "NFC-EMP2-PT03",
+        "uid_nfc": "04C45D6E7F80A2",
+        "location_description": (
+            "Puerta del cuarto de máquinas, nivel sótano del edificio técnico."
+        ),
+        "latitude": 39.464900,
+        "longitude": -0.332100,
+        "geofence_radius_m": 30,
     },
 )
 
@@ -127,6 +182,7 @@ COMPANY_USER_EMAIL = "cliente@demo.com"
 #: cronómetro, las pausas y el historial tengan datos realistas en la app.
 DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
     {
+        "company": "qr",
         "guard": "guardia1@demo.com",
         "status": RoundStatus.IN_PROGRESS,
         "start_minutes_ago": 8,
@@ -149,6 +205,7 @@ DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "company": "qr",
         "guard": "guardia1@demo.com",
         "status": RoundStatus.COMPLETED,
         "start_minutes_ago": 180,
@@ -182,6 +239,7 @@ DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "company": "qr",
         "guard": "guardia2@demo.com",
         "status": RoundStatus.PAUSED,
         "start_minutes_ago": 60,
@@ -209,6 +267,7 @@ DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "company": "qr",
         "guard": "guardia1@demo.com",
         "status": RoundStatus.CANCELLED,
         "start_minutes_ago": 300,
@@ -222,6 +281,41 @@ DEMO_ROUNDS: tuple[dict[str, Any], ...] = (
         ),
         "logs": (),
     },
+    {
+        "company": "nfc",
+        "guard": "guardia2@demo.com",
+        "status": RoundStatus.COMPLETED,
+        "start_minutes_ago": 95,
+        "end_minutes_ago": 80,
+        "paused_minutes_ago": None,
+        "paused_seconds": 0,
+        "last_activity_minutes_ago": 80,
+        "cancel_reason": None,
+        "observations": (
+            "Ronda NFC completada: etiquetas leídas sin conexión y sincronizadas "
+            "al recuperar la señal."
+        ),
+        "logs": (
+            {
+                "code": "NFC-EMP2-PT01",
+                "name": "Portal Marítimo",
+                "minutes_ago": 92,
+                "elapsed_seconds": 180,
+            },
+            {
+                "code": "NFC-EMP2-PT02",
+                "name": "Muelle de Carga",
+                "minutes_ago": 87,
+                "elapsed_seconds": 480,
+            },
+            {
+                "code": "NFC-EMP2-PT03",
+                "name": "Cuarto de Máquinas",
+                "minutes_ago": 82,
+                "elapsed_seconds": 780,
+            },
+        ),
+    },
 )
 
 
@@ -232,15 +326,17 @@ def _minutes_ago(now: datetime, minutes: int | None) -> datetime | None:
     return now - timedelta(minutes=minutes)
 
 
-def _seed_company(db: Session) -> tuple[Company, bool]:
-    """Devuelve la empresa demo, creándola si todavía no existe."""
-    company = db.scalar(
-        select(Company).where(Company.tax_id == DEMO_COMPANY["tax_id"])
-    )
+def _seed_company(
+    db: Session,
+    spec: dict[str, Any] | None = None,
+) -> tuple[Company, bool]:
+    """Devuelve la empresa demo indicada, creándola si todavía no existe."""
+    data = DEMO_COMPANY if spec is None else spec
+    company = db.scalar(select(Company).where(Company.tax_id == data["tax_id"]))
     if company is not None:
         return company, False
 
-    company = Company(**DEMO_COMPANY)
+    company = Company(**data)
     db.add(company)
     db.flush()  # asigna el ID sin cerrar la transacción
     return company, True
@@ -270,12 +366,13 @@ def _seed_users(db: Session) -> tuple[dict[str, User], int]:
     return users, created
 
 
-def _seed_assignments(company: Company, users: dict[str, User]) -> None:
-    """Asigna la empresa demo a los usuarios y los guardias a la supervisora."""
-    for email in (SUPERVISOR_EMAIL, *GUARD_EMAILS, COMPANY_USER_EMAIL):
-        user = users[email]
-        if company not in user.companies:
-            user.companies.append(company)
+def _seed_assignments(companies: Sequence[Company], users: dict[str, User]) -> None:
+    """Asigna las empresas demo a los usuarios y los guardias a la supervisora."""
+    for company in companies:
+        for email in (SUPERVISOR_EMAIL, *GUARD_EMAILS, COMPANY_USER_EMAIL):
+            user = users[email]
+            if company not in user.companies:
+                user.companies.append(company)
 
     supervisor = users[SUPERVISOR_EMAIL]
     for email in GUARD_EMAILS:
@@ -284,31 +381,43 @@ def _seed_assignments(company: Company, users: dict[str, User]) -> None:
             supervisor.supervised_guards.append(guard)
 
 
-def _seed_checkpoints(db: Session, company: Company) -> int:
-    """Crea los puntos demo que falten y completa sus coordenadas."""
+def _seed_checkpoints(
+    db: Session,
+    company: Company,
+    specs: tuple[dict[str, Any], ...] = DEMO_CHECKPOINTS,
+) -> int:
+    """Crea los puntos demo que falten y completa sus datos físicos.
+
+    En bases sembradas antes de la geovalla se completan las coordenadas y, en
+    empresas NFC, el ``uid_nfc`` de cada etiqueta sin sobrescribir lo que haya
+    configurado el cliente.
+    """
     existing = {
         checkpoint.code: checkpoint
         for checkpoint in db.scalars(
             select(Checkpoint).where(
                 Checkpoint.company_id == company.id,
-                Checkpoint.code.in_(
-                    [str(spec["code"]) for spec in DEMO_CHECKPOINTS]
-                ),
+                Checkpoint.code.in_([str(spec["code"]) for spec in specs]),
             )
         )
     }
 
     created = 0
-    for spec in DEMO_CHECKPOINTS:
+    for spec in specs:
         code = str(spec["code"])
         checkpoint = existing.get(code)
+        uid_nfc = spec.get("uid_nfc")
 
         if checkpoint is not None:
-            # Bases sembradas antes de la geovalla: se completan las
-            # coordenadas sin sobrescribir las que haya configurado el cliente.
-            if checkpoint.latitude is None:
+            if (
+                checkpoint.latitude is None
+                and spec.get("latitude") is not None
+                and spec.get("longitude") is not None
+            ):
                 checkpoint.latitude = float(spec["latitude"])
                 checkpoint.longitude = float(spec["longitude"])
+            if uid_nfc is not None and checkpoint.uid_nfc is None:
+                checkpoint.uid_nfc = str(uid_nfc)
             continue
 
         db.add(
@@ -316,9 +425,16 @@ def _seed_checkpoints(db: Session, company: Company) -> int:
                 company_id=company.id,
                 name=str(spec["name"]),
                 code=code,
+                uid_nfc=str(uid_nfc) if uid_nfc is not None else None,
                 location_description=str(spec["location_description"]),
-                latitude=float(spec["latitude"]),
-                longitude=float(spec["longitude"]),
+                latitude=(
+                    float(spec["latitude"]) if spec.get("latitude") is not None else None
+                ),
+                longitude=(
+                    float(spec["longitude"])
+                    if spec.get("longitude") is not None
+                    else None
+                ),
                 geofence_radius_m=int(spec.get("geofence_radius_m", 50)),
                 is_active=True,
             )
@@ -329,7 +445,7 @@ def _seed_checkpoints(db: Session, company: Company) -> int:
 
 def _seed_rounds(
     db: Session,
-    company: Company,
+    companies: dict[str, Company],
     users: dict[str, User],
     now: datetime,
 ) -> tuple[int, int]:
@@ -344,11 +460,16 @@ def _seed_rounds(
     checkpoints_by_code = {
         checkpoint.code: checkpoint
         for checkpoint in db.scalars(
-            select(Checkpoint).where(Checkpoint.company_id == company.id)
+            select(Checkpoint).where(
+                Checkpoint.company_id.in_(
+                    [company.id for company in companies.values()]
+                )
+            )
         )
     }
 
     for spec in DEMO_ROUNDS:
+        company = companies[str(spec["company"])]
         # Clave natural del seed: empresa + estado + observaciones.
         exists = db.scalar(
             select(Round).where(
@@ -381,11 +502,18 @@ def _seed_rounds(
         for log_spec in spec["logs"]:
             code = str(log_spec["code"])
             checkpoint = checkpoints_by_code.get(code)
+            # En los puntos NFC el log guarda el UID físico de la etiqueta,
+            # igual que hace la API al registrar una marcación.
+            tag_id = (
+                checkpoint.uid_nfc
+                if checkpoint is not None and checkpoint.uid_nfc
+                else code
+            )
             db.add(
                 RoundLog(
                     round_id=round_obj.id,
                     checkpoint_id=checkpoint.id if checkpoint is not None else None,
-                    nfc_tag_id=code,
+                    nfc_tag_id=tag_id,
                     checkpoint_name=str(
                         log_spec.get("name")
                         or (checkpoint.name if checkpoint else code)
@@ -403,7 +531,7 @@ def _seed_rounds(
 
 
 def seed_demo_data(db: Session) -> dict[str, int]:
-    """Siembra empresa, usuarios, asignaciones, puntos y rondas demo.
+    """Siembra empresas, usuarios, asignaciones, puntos y rondas demo.
 
     Returns:
         Contadores de registros creados: ``companies``, ``users``,
@@ -412,24 +540,35 @@ def seed_demo_data(db: Session) -> dict[str, int]:
     """
     now = datetime.now(timezone.utc)
 
-    company, company_created = _seed_company(db)
+    # Una empresa QR (puntos impresos) y otra NFC (etiquetas físicas).
+    companies: dict[str, Company] = {}
+    companies_created = 0
+    checkpoints_created = 0
+    for key, company_spec, checkpoint_specs in (
+        ("qr", DEMO_COMPANY, DEMO_CHECKPOINTS),
+        ("nfc", DEMO_NFC_COMPANY, DEMO_NFC_CHECKPOINTS),
+    ):
+        company, company_created = _seed_company(db, company_spec)
+        companies[key] = company
+        companies_created += int(company_created)
+        checkpoints_created += _seed_checkpoints(db, company, checkpoint_specs)
+
     users, users_created = _seed_users(db)
-    _seed_assignments(company, users)
-    checkpoints_created = _seed_checkpoints(db, company)
-    rounds_created, logs_created = _seed_rounds(db, company, users, now)
+    _seed_assignments(tuple(companies.values()), users)
+    rounds_created, logs_created = _seed_rounds(db, companies, users, now)
     db.commit()
 
     stats = {
-        "companies": int(company_created),
+        "companies": companies_created,
         "users": users_created,
         "checkpoints": checkpoints_created,
         "rounds": rounds_created,
         "logs": logs_created,
     }
     logger.info(
-        "Seed completado -> empresa: %s | usuarios nuevos: %d | "
+        "Seed completado -> empresas nuevas: %d | usuarios nuevos: %d | "
         "puntos de control nuevos: %d | rondas nuevas: %d | logs nuevos: %d",
-        "creada" if company_created else "ya existía",
+        companies_created,
         users_created,
         checkpoints_created,
         rounds_created,

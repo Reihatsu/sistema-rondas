@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Building2,
+  Nfc,
   Pencil,
   Phone,
   Plus,
   Power,
   PowerOff,
+  QrCode,
   RefreshCw,
   Search,
 } from "lucide-react";
@@ -24,15 +26,36 @@ import {
 } from "../components/ui";
 import { useAuth } from "../auth/AuthContext";
 import { companiesApi, getErrorMessage } from "../services/api";
-import { formatDate } from "../utils/format";
+import {
+  POINT_TYPE_LABELS,
+  POINT_TYPE_SHORT_LABELS,
+  POINT_TYPE_TONES,
+  formatDate,
+} from "../utils/format";
 
 const EMPTY_FORM = {
   name: "",
   tax_id: "",
   address: "",
   phone: "",
+  point_type: "QR",
   is_active: true,
 };
+
+const POINT_TYPES = [
+  {
+    value: "QR",
+    icon: QrCode,
+    label: "Código QR",
+    description: "Se imprime un código por punto y se escanea con la cámara.",
+  },
+  {
+    value: "NFC",
+    icon: Nfc,
+    label: "Etiqueta NFC",
+    description: "Cada punto lleva una etiqueta física con un UID único.",
+  },
+];
 
 const FILTERS = [
   { value: "", label: "Todas" },
@@ -112,6 +135,7 @@ export default function Companies() {
       tax_id: company.tax_id,
       address: company.address || "",
       phone: company.phone || "",
+      point_type: company.point_type || "QR",
       is_active: company.is_active,
     });
     setFormError("");
@@ -135,15 +159,22 @@ export default function Companies() {
       tax_id: form.tax_id.trim(),
       address: form.address.trim() || null,
       phone: form.phone.trim() || null,
+      point_type: form.point_type,
     };
 
     try {
       if (editing) {
+        const typeChanged =
+          editing.point_type && editing.point_type !== form.point_type;
         await companiesApi.update(editing.id, {
           ...payload,
           is_active: form.is_active,
         });
-        setNotice("Empresa actualizada correctamente.");
+        setNotice(
+          typeChanged
+            ? "Empresa actualizada. Los puntos de control del tipo anterior quedaron inactivos."
+            : "Empresa actualizada correctamente.",
+        );
         await load();
       } else {
         await companiesApi.create({ ...payload, is_active: form.is_active });
@@ -284,6 +315,7 @@ export default function Companies() {
                 <tr>
                   <th>Empresa</th>
                   <th>NIF/CIF</th>
+                  <th>Punto</th>
                   <th>Contacto</th>
                   <th>Estado</th>
                   <th>Creada</th>
@@ -308,6 +340,20 @@ export default function Companies() {
                       </div>
                     </td>
                     <td className="font-mono text-xs">{company.tax_id}</td>
+                    <td>
+                      <Badge tone={POINT_TYPE_TONES[company.point_type] || "neutral"}>
+                        <span className="inline-flex items-center gap-1">
+                          {company.point_type === "NFC" ? (
+                            <Nfc className="h-3 w-3" aria-hidden="true" />
+                          ) : (
+                            <QrCode className="h-3 w-3" aria-hidden="true" />
+                          )}
+                          {POINT_TYPE_SHORT_LABELS[company.point_type] ||
+                            POINT_TYPE_LABELS[company.point_type] ||
+                            "QR"}
+                        </span>
+                      </Badge>
+                    </td>
                     <td>
                       <div className="space-y-0.5 text-xs text-slate-500">
                         <p className="max-w-[220px] truncate">
@@ -443,6 +489,63 @@ export default function Companies() {
                 placeholder="B12345678"
               />
             </div>
+
+            <fieldset>
+              <legend className="label">Tecnología de los puntos de control *</legend>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {POINT_TYPES.map((type) => {
+                  const Icon = type.icon;
+                  const selected = form.point_type === type.value;
+
+                  return (
+                    <label
+                      key={type.value}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2.5 transition",
+                        selected
+                          ? "border-odoo-400 bg-odoo-50"
+                          : "border-slate-200 bg-white hover:border-slate-300",
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="company-point-type"
+                        value={type.value}
+                        checked={selected}
+                        onChange={() =>
+                          setForm((previous) => ({
+                            ...previous,
+                            point_type: type.value,
+                          }))
+                        }
+                        className="mt-0.5"
+                      />
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                          <Icon className="h-4 w-4" aria-hidden="true" />
+                          {type.label}
+                        </span>
+                        <span className="block text-xs text-slate-500">
+                          {type.description}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              {editing?.point_type && editing.point_type !== form.point_type ? (
+                <p className="mt-1.5 text-xs text-amber-600">
+                  Al cambiar la tecnología se desactivan los puntos de control del
+                  tipo anterior ({POINT_TYPE_LABELS[editing.point_type]}). Podrá
+                  reactivarlos manualmente cuando actualice el tipo.
+                </p>
+              ) : (
+                <p className="mt-1.5 text-xs text-slate-500">
+                  Define qué identificador usa cada punto: el código QR impreso o el
+                  UID de la etiqueta NFC.
+                </p>
+              )}
+            </fieldset>
 
             <div>
               <label htmlFor="company-address" className="label">

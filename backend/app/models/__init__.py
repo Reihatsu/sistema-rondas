@@ -10,6 +10,7 @@ from app.models.base import Base
 from app.models.checkpoint import Checkpoint
 from app.models.company import Company
 from app.models.enums import (
+    PointType,
     RoundCheckpointStatus,
     RoundLogStatus,
     RoundStatus,
@@ -22,6 +23,7 @@ __all__ = [
     "Base",
     "Checkpoint",
     "Company",
+    "PointType",
     "Round",
     "RoundCheckpointStatus",
     "RoundLog",

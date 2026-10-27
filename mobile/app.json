@@ -54,7 +54,13 @@
           "imageWidth": 76
         }
       ],
-      "./plugins/withMlKitKeepRules"
+      "./plugins/withMlKitKeepRules",
+      [
+        "react-native-nfc-manager",
+        {
+          "nfcPermission": "La aplicación requiere acceso al lector NFC para registrar los puntos de control con etiquetas físicas."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

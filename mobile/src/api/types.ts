@@ -11,6 +11,14 @@ export type RoundStatus = 'PENDING' | 'IN_PROGRESS' | 'PAUSED' | 'COMPLETED' | '
 
 export type RoundLogStatus = 'OK' | 'INCIDENT' | 'SKIPPED';
 
+/**
+ * Tecnología de los puntos de control de una empresa.
+ *
+ * - `QR`: el guardia lee un código impreso y el móvil valida la geovalla GPS.
+ * - `NFC`: el guardia acerca la etiqueta física y el dispositivo lee su UID.
+ */
+export type PointType = 'QR' | 'NFC';
+
 /** Estado operativo de un checkpoint dentro de una ronda. */
 export type RoundCheckpointStatus = 'PENDING' | 'COMPLETED';
 
@@ -19,6 +27,8 @@ export interface CompanySummary {
   name: string;
   tax_id: string;
   is_active: boolean;
+  /** Tecnología de los puntos de control configurada para la empresa. */
+  point_type: PointType;
 }
 
 export interface UserSummary {
@@ -69,6 +79,10 @@ export interface Checkpoint {
   location_description: string | null;
   is_active: boolean;
   created_at: string;
+  /** UID físico de la etiqueta NFC; requerido cuando la empresa usa NFC. */
+  uid_nfc: string | null;
+  /** Tecnología propia del punto; hereda la de su empresa. */
+  point_type: PointType | null;
   company: CompanySummary | null;
 }
 
@@ -140,6 +154,10 @@ export interface RoundCheckpoint {
   longitude: number | null;
   /** Radio de la geovalla en metros. */
   geofence_radius_m: number;
+  /** UID de la etiqueta NFC del punto; `null` en puntos QR. */
+  uid_nfc: string | null;
+  /** Tecnología del punto; `null` si el backend aún no la expone. */
+  point_type: PointType | null;
   status: RoundCheckpointStatus;
   is_visited: boolean;
   visited_at: string | null;
@@ -149,11 +167,19 @@ export interface RoundCheckpoint {
   segment_seconds: number | null;
 }
 
-/** Payload de `POST /rounds/{id}/checkin` (`RoundCheckInCreate`). */
+/**
+ * Payload de `POST /rounds/{id}/checkin` (`RoundCheckInCreate`).
+ *
+ * Debe enviarse `qr_code` o `nfc_uid`:
+ * - `qr_code` exige `latitude` y `longitude` para validar la geovalla.
+ * - `nfc_uid` admite coordenadas nulas (marcación sin GPS).
+ */
 export interface CheckInPayload {
-  qr_code: string;
-  latitude: number;
-  longitude: number;
+  qr_code?: string;
+  /** UID de la etiqueta NFC, en hexadecimal mayúsculas y sin separadores. */
+  nfc_uid?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   /**
    * Instante real del escaneo (ISO 8601). El backend lo usa para conservar la
    * hora y el cronómetro cuando una marcación se sincroniza desde la cola.

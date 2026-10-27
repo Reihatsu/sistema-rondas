@@ -16,6 +16,13 @@ class UserRole(str, enum.Enum):
     GUARD = "GUARD"
 
 
+class PointType(str, enum.Enum):
+    """Tecnología con la que se identifican los puntos de una empresa."""
+
+    QR = "QR"
+    NFC = "NFC"
+
+
 class RoundStatus(str, enum.Enum):
     """Ciclo de vida de una ronda."""
 
@@ -61,5 +68,6 @@ def sa_enum(enum_class: type[enum.Enum], name: str) -> SAEnum:
 
 
 user_role_type = sa_enum(UserRole, "user_role")
+point_type_type = sa_enum(PointType, "point_type")
 round_status_type = sa_enum(RoundStatus, "round_status")
 round_log_status_type = sa_enum(RoundLogStatus, "round_log_status")

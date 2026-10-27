@@ -12,7 +12,7 @@
  * recién visitados sin reiniciar la aplicación.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -37,16 +37,19 @@ import {
   startNewRound,
 } from '@/api/rounds';
 import type {
+  PointType,
   RoundCheckpoint,
   RoundDetail,
   RoundStatus,
 } from '@/api/types';
 import { CommentPromptModal } from '@/components/comment-prompt-modal';
+import { CompanyPicker } from '@/components/company-picker';
 import { InactivityWarning, RoundTimer } from '@/components/round-timer';
 import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { cacheRoundCheckpoints } from '@/services/checkpointCache';
 import { formatClock, formatDuration, formatTime, secondsUntil } from '@/utils/datetime';
@@ -215,6 +218,7 @@ function ActionButton({
 export default function RondasScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const { user } = useAuth();
   const { roundId: rawFinishedRoundId } = useLocalSearchParams<{
     roundId?: string | string[];
   }>();
@@ -223,6 +227,13 @@ export default function RondasScreen() {
     Array.isArray(rawFinishedRoundId) ? rawFinishedRoundId[0] : rawFinishedRoundId,
   );
 
+  /** Empresas activas asignadas al guardia; cada ronda pertenece a una sola. */
+  const companies = useMemo(
+    () => (user?.companies ?? []).filter((company) => company.is_active),
+    [user],
+  );
+
+  const [selectedCompanyId, setSelectedCompanyId] = useState<number | null>(null);
   const [round, setRound] = useState<RoundDetail | null>(null);
   const [finishedRound, setFinishedRound] = useState<RoundDetail | null>(null);
   const [checkpoints, setCheckpoints] = useState<RoundCheckpoint[]>([]);
@@ -349,6 +360,24 @@ export default function RondasScreen() {
     return () => clearInterval(interval);
   }, [round]);
 
+  // La selección debe apuntar siempre a una empresa vigente del guardia.
+  useEffect(() => {
+    setSelectedCompanyId((current) => {
+      if (current !== null && companies.some((company) => company.id === current)) {
+        return current;
+      }
+
+      return companies[0]?.id ?? null;
+    });
+  }, [companies]);
+
+  // Con una ronda abierta la empresa la fija la ronda, no el selector.
+  useEffect(() => {
+    if (round?.company_id !== undefined) {
+      setSelectedCompanyId(round.company_id);
+    }
+  }, [round?.company_id]);
+
   const applyRound = useCallback(
     (updated: RoundDetail) => {
       setRound(updated);
@@ -367,6 +396,19 @@ export default function RondasScreen() {
   const isCancelled = round?.status === 'CANCELLED';
   const canScan = Boolean(round && isInProgress && total > 0 && !allVisited);
   const progressPercent = total > 0 ? Math.round((visited / total) * 100) : 0;
+
+  const selectedCompany =
+    companies.find((company) => company.id === selectedCompanyId) ??
+    companies[0] ??
+    null;
+
+  /**
+   * Tecnología de los puntos con la que debe abrirse el escáner. La empresa de
+   * la ronda activa manda; si aún no hay ronda se usa la empresa seleccionada
+   * para iniciarla.
+   */
+  const scanPointType: PointType =
+    round?.company?.point_type ?? selectedCompany?.point_type ?? 'QR';
 
   const timerBase = timerBaseRef.current;
   const elapsedSeconds = round
@@ -404,7 +446,10 @@ export default function RondasScreen() {
 
     router.push({
       pathname: '/scan',
-      params: { roundId: String(round.id) },
+      params: {
+        roundId: String(round.id),
+        pointType: scanPointType,
+      },
     });
   }
 
@@ -443,7 +488,7 @@ export default function RondasScreen() {
     setError(null);
 
     try {
-      const created = await startNewRound();
+      const created = await startNewRound(selectedCompanyId ?? undefined);
 
       // La ronda ya está en curso: se pinta de inmediato para que el
       // cronómetro arranque aunque la consulta de checkpoints tarde.
@@ -451,6 +496,7 @@ export default function RondasScreen() {
       setRound(created);
       syncTimer(created);
       lastRoundIdRef.current = created.id;
+      setSelectedCompanyId(created.company_id);
 
       try {
         const items = await listRoundCheckpoints(created.id);
@@ -462,7 +508,11 @@ export default function RondasScreen() {
 
       router.push({
         pathname: '/scan',
-        params: { roundId: String(created.id), from: 'rounds' },
+        params: {
+          roundId: String(created.id),
+          from: 'rounds',
+          pointType: created.company?.point_type ?? scanPointType,
+        },
       });
     } catch (startError) {
       const message = getErrorMessage(startError);
@@ -592,6 +642,12 @@ export default function RondasScreen() {
 
               <ThemedText type="subtitle" numberOfLines={2}>
                 {round.company?.name ?? 'Mi ronda'}
+              </ThemedText>
+
+              <ThemedText type="small" themeColor="textSecondary">
+                {scanPointType === 'NFC'
+                  ? 'Puntos NFC: acerque el móvil a la etiqueta del punto.'
+                  : 'Puntos QR: escanee el código y valide su ubicación GPS.'}
               </ThemedText>
 
               <RoundTimer
@@ -780,6 +836,21 @@ export default function RondasScreen() {
               </ThemedText>
             </View>
 
+            {companies.length > 0 ? (
+              <CompanyPicker
+                companies={companies}
+                selectedCompanyId={selectedCompanyId}
+                onSelect={setSelectedCompanyId}
+                disabled={busyAction !== 'none'}
+                title="Empresa de la próxima ronda"
+              />
+            ) : (
+              <ThemedText type="small" themeColor="textSecondary">
+                No tiene una empresa activa asignada. Solicite al administrador que
+                le asigne una empresa con puntos de control.
+              </ThemedText>
+            )}
+
             <ActionButton
               label="Iniciar Nueva Ronda"
               variant="primary"
@@ -787,7 +858,7 @@ export default function RondasScreen() {
                 void handleStartNewRound();
               }}
               loading={busyAction === 'starting'}
-              disabled={busyAction !== 'none'}
+              disabled={busyAction !== 'none' || companies.length === 0}
             />
             <ActionButton
               label="Ver historial de rondas"
@@ -804,9 +875,23 @@ export default function RondasScreen() {
         <ThemedView type="backgroundElement" style={styles.stateCard}>
           <ThemedText type="smallBold">Sin ronda activa</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            Inicie una ronda nueva para comenzar el recorrido. El servidor
-            asignará automáticamente los checkpoints activos de su empresa.
+            Inicie una ronda nueva para comenzar el recorrido. Se asignarán los
+            checkpoints activos de la empresa seleccionada.
           </ThemedText>
+
+          {companies.length > 0 ? (
+            <CompanyPicker
+              companies={companies}
+              selectedCompanyId={selectedCompanyId}
+              onSelect={setSelectedCompanyId}
+              disabled={busyAction !== 'none'}
+            />
+          ) : (
+            <ThemedText type="small" themeColor="textSecondary">
+              No tiene una empresa activa asignada. Solicite al administrador que
+              le asigne una empresa con puntos de control.
+            </ThemedText>
+          )}
 
           {error ? (
             <View style={[styles.banner, { borderColor: DANGER }]}>
@@ -823,7 +908,7 @@ export default function RondasScreen() {
               void handleStartNewRound();
             }}
             loading={busyAction === 'starting'}
-            disabled={busyAction !== 'none'}
+            disabled={busyAction !== 'none' || companies.length === 0}
           />
           <ActionButton label="Ver historial de rondas" onPress={openHistory} />
           <ActionButton
@@ -878,7 +963,11 @@ export default function RondasScreen() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={
-              allVisited ? 'Ronda completa' : 'Escanear checkpoint QR'
+              allVisited
+                ? 'Ronda completa'
+                : scanPointType === 'NFC'
+                  ? 'Leer etiqueta NFC de checkpoint'
+                  : 'Escanear checkpoint QR'
             }
             accessibilityState={{ disabled: !canScan }}
             disabled={!canScan}
@@ -897,7 +986,9 @@ export default function RondasScreen() {
                 ? 'Ronda completa'
                 : total === 0
                   ? 'Sin puntos de control'
-                  : 'Escanear Checkpoint (QR)'}
+                  : scanPointType === 'NFC'
+                    ? 'Leer Etiqueta NFC'
+                    : 'Escanear Checkpoint (QR)'}
             </ThemedText>
           </Pressable>
         ) : null}
