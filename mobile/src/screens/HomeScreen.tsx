@@ -5,7 +5,7 @@
  * `AppNavigator` vuelve a la pantalla de login.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter, type Href } from 'expo-router';
+import { useFocusEffect, useRouter, type Href } from 'expo-router';
 
 import { getErrorMessage } from '@/api/client';
 import { getActiveRound, startNewRound } from '@/api/rounds';
@@ -57,6 +57,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isStartingRound, setIsStartingRound] = useState(false);
+  const [hasActiveRound, setHasActiveRound] = useState(false);
   const [selectedCompanyId, setSelectedCompanyId] = useState<number | null>(null);
 
   const displayName = user?.name ?? 'Guardia';
@@ -79,6 +80,50 @@ export default function HomeScreen() {
       return companies[0]?.id ?? null;
     });
   }, [companies]);
+
+  // Con una ronda abierta la empresa queda fijada por esa ronda: se bloquea el
+  // selector para evitar elegir una empresa que no corresponde.
+  useFocusEffect(
+    useCallback(() => {
+      let isCurrent = true;
+
+      if (!isGuard) {
+        setHasActiveRound(false);
+        return () => {
+          isCurrent = false;
+        };
+      }
+
+      getActiveRound()
+        .then((active) => {
+          if (!isCurrent) {
+            return;
+          }
+
+          const isOpen = Boolean(active && active.status !== 'CANCELLED');
+          setHasActiveRound(isOpen);
+
+          // El selector bloqueado debe mostrar la empresa real de la ronda,
+          // aunque la app se haya reiniciado y la primera empresa asignada sea
+          // otra distinta.
+          if (isOpen && active) {
+            setSelectedCompanyId((current) =>
+              companies.some((company) => company.id === active.company_id)
+                ? active.company_id
+                : current,
+            );
+          }
+        })
+        .catch(() => {
+          // Sin conexión se conserva el último estado conocido; iniciar una
+          // ronda sigue validando el conflicto contra el backend.
+        });
+
+      return () => {
+        isCurrent = false;
+      };
+    }, [companies, isGuard]),
+  );
 
   /**
    * Crea una ronda nueva desde el servidor y abre directamente el escáner.
@@ -185,23 +230,39 @@ export default function HomeScreen() {
                   companies={companies}
                   selectedCompanyId={selectedCompanyId}
                   onSelect={setSelectedCompanyId}
-                  disabled={isStartingRound}
-                  title="Empresa de la ronda"
+                  disabled={isStartingRound || hasActiveRound}
+                  title={
+                    hasActiveRound
+                      ? 'Empresa fijada por la ronda activa'
+                      : 'Empresa de la ronda'
+                  }
                 />
+              ) : null}
+
+              {hasActiveRound ? (
+                <ThemedText type="small" themeColor="textSecondary">
+                  Tiene una ronda en curso: la empresa queda fijada por esa ronda.
+                  Continúela desde «Mis Rondas» antes de iniciar otra.
+                </ThemedText>
               ) : null}
 
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={
-                  companies.length === 0
-                    ? 'No puede iniciar una ronda sin empresas activas'
-                    : 'Iniciar una nueva ronda'
+                  hasActiveRound
+                    ? 'Ya tiene una ronda activa: continúela desde Mis Rondas'
+                    : companies.length === 0
+                      ? 'No puede iniciar una ronda sin empresas activas'
+                      : 'Iniciar una nueva ronda'
                 }
                 accessibilityState={{
-                  disabled: isStartingRound || companies.length === 0,
+                  disabled:
+                    isStartingRound || companies.length === 0 || hasActiveRound,
                   busy: isStartingRound,
                 }}
-                disabled={isStartingRound || companies.length === 0}
+                disabled={
+                  isStartingRound || companies.length === 0 || hasActiveRound
+                }
                 onPress={() => {
                   void handleStartNewRound();
                 }}
@@ -209,7 +270,9 @@ export default function HomeScreen() {
                   styles.primaryAction,
                   {
                     opacity:
-                      isStartingRound || companies.length === 0
+                      isStartingRound ||
+                      companies.length === 0 ||
+                      hasActiveRound
                         ? 0.7
                         : pressed
                           ? 0.85
@@ -285,7 +348,30 @@ export default function HomeScreen() {
                 <ThemedText style={styles.secondaryActionArrow}>›</ThemedText>
               </Pressable>
             </>
-          ) : null}
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Abrir puntos de control"
+              onPress={() => {
+                router.push('/puntos' as Href);
+              }}
+              style={({ pressed }) => [
+                styles.secondaryAction,
+                {
+                  borderColor: theme.backgroundSelected,
+                  opacity: pressed ? 0.85 : 1,
+                },
+              ]}>
+              <View style={styles.primaryActionBody}>
+                <ThemedText type="smallBold">Puntos de control</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  Consulte la ubicación y el UID NFC de los puntos de sus
+                  empresas para mantenerlos actualizados.
+                </ThemedText>
+              </View>
+              <ThemedText style={styles.secondaryActionArrow}>›</ThemedText>
+            </Pressable>
+          )}
 
           <ThemedView type="backgroundElement" style={styles.card}>
             <ThemedText type="smallBold">Cuenta</ThemedText>

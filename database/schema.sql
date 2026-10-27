@@ -2,7 +2,7 @@
 -- Sistema de Rondas - Esquema de base de datos (MySQL 8+)
 -- ---------------------------------------------------------------------------
 -- Este script es equivalente al esquema generado por Alembic
--- (backend/alembic/versions/0001_initial_schema.py a 0005_point_types.py)
+-- (backend/alembic/versions/0001_initial_schema.py a 0006_nullable_checkpoint_fields.py)
 -- y por los modelos SQLAlchemy. Úselo solo si prefiere inicializar la base de
 -- datos por SQL.
 --

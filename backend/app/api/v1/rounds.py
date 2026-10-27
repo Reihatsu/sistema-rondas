@@ -88,7 +88,6 @@ INACTIVITY_CANCELLED_MESSAGE = (
 )
 
 
-
 def _scope(current_user: User) -> tuple[list[int] | None, int | None]:
     """Calcula el alcance de datos según el rol del usuario.
 
@@ -538,6 +537,10 @@ def list_round_history(
     current_user: CurrentUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    company_id: int | None = Query(
+        None,
+        description="Limita el historial a una empresa concreta.",
+    ),
     round_status: RoundStatus | None = Query(
         None,
         alias="status",
@@ -576,8 +579,9 @@ def list_round_history(
     filtro con ``all_time=true``.
 
     Las rondas pausadas se incluyen porque el guardia puede continuarlas desde
-    la pantalla de historial. El alcance por rol es el mismo que en el resto
-    del módulo; un guardia solo ve las suyas.
+    la pantalla de historial. ``company_id`` permite filtrar el historial por
+    empresa asignada. El alcance por rol es el mismo que en el resto del módulo;
+    un guardia solo ve las suyas.
     """
     allowed_company_ids, restricted_guard_id = _scope(current_user)
     statuses = (round_status,) if round_status else HISTORY_STATUSES
@@ -590,6 +594,7 @@ def list_round_history(
         db,
         page=page,
         page_size=page_size,
+        company_id=company_id,
         statuses=statuses,
         date_from=effective_date_from,
         date_to=date_to,

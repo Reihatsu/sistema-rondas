@@ -79,8 +79,13 @@ export interface Checkpoint {
   location_description: string | null;
   is_active: boolean;
   created_at: string;
-  /** UID físico de la etiqueta NFC; requerido cuando la empresa usa NFC. */
+  /** UID físico de la etiqueta NFC; opcional hasta instalar la etiqueta. */
   uid_nfc: string | null;
+  /** Coordenadas opcionales; solo se usan para la geovalla de puntos QR. */
+  latitude: number | null;
+  longitude: number | null;
+  /** Radio de la geovalla en metros (solo puntos QR). */
+  geofence_radius_m: number;
   /** Tecnología propia del punto; hereda la de su empresa. */
   point_type: PointType | null;
   company: CompanySummary | null;

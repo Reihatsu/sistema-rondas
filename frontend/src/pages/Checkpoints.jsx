@@ -222,18 +222,12 @@ export default function Checkpoints() {
     }
 
     const uidNfc = normalizeNfcUid(form.uid_nfc);
-    if (isNfcPoint && !uidNfc) {
-      setFormError(
-        "Esta empresa usa etiquetas NFC: indique el UID de la etiqueta del punto.",
-      );
-      return;
-    }
 
     const latitude = toNumberOrNull(form.latitude);
     const longitude = toNumberOrNull(form.longitude);
-    if (!isNfcPoint && (latitude === null || longitude === null)) {
+    if ((latitude === null) !== (longitude === null)) {
       setFormError(
-        "Las coordenadas son obligatorias para validar las marcaciones por QR.",
+        "Indique latitud y longitud juntas, o deje ambas coordenadas vacías.",
       );
       return;
     }
@@ -246,8 +240,9 @@ export default function Checkpoints() {
       company_id: Number(form.company_id),
       name: form.name.trim(),
       location_description: form.location_description.trim() || null,
-      latitude,
-      longitude,
+      // Las coordenadas solo aplican a puntos QR; en NFC se envían vacías.
+      latitude: isNfcPoint ? null : latitude,
+      longitude: isNfcPoint ? null : longitude,
       geofence_radius_m: radius ?? DEFAULT_GEOFENCE_METERS,
       uid_nfc: isNfcPoint ? uidNfc : null,
     };
@@ -671,8 +666,8 @@ export default function Checkpoints() {
           title={editing ? "Editar punto de control" : "Nuevo punto de control"}
           subtitle={
             isNfcPoint
-              ? "Esta empresa usa etiquetas NFC: registre el UID de la etiqueta física del punto."
-              : "Esta empresa usa códigos QR: el sistema puede generar el código automáticamente."
+              ? "Esta empresa usa etiquetas NFC: el UID es opcional y puede registrarse ahora o después."
+              : "Esta empresa usa códigos QR: puede generar el código y capturar las coordenadas ahora o después."
           }
           onClose={closeModal}
           footer={
@@ -739,8 +734,8 @@ export default function Checkpoints() {
                     <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
                   )}
                   {isNfcPoint
-                    ? "Puntos con etiqueta NFC: se solicita el UID físico."
-                    : "Puntos con código QR: se solicita el código impreso."}
+                    ? "Puntos con etiqueta NFC: el UID físico es opcional."
+                    : "Puntos con código QR: las coordenadas se usan para la geovalla."}
                 </p>
               ) : null}
               {companies.length === 0 && !companiesError ? (
@@ -805,12 +800,11 @@ export default function Checkpoints() {
             {isNfcPoint ? (
               <div>
                 <label htmlFor="checkpoint-uid" className="label">
-                  UID de la etiqueta NFC *
+                  UID de la etiqueta NFC (opcional)
                 </label>
                 <input
                   id="checkpoint-uid"
                   type="text"
-                  required
                   maxLength={100}
                   value={form.uid_nfc}
                   onChange={(event) =>
@@ -825,84 +819,87 @@ export default function Checkpoints() {
                   spellCheck={false}
                 />
                 <p className="mt-1 text-xs text-slate-500">
-                  Hex en mayúsculas y sin separadores; se limpian los dos puntos
+                  Opcional: puede completarlo cuando instale la etiqueta. Hex en
+                  mayúsculas y sin separadores; se limpian los dos puntos
                   automáticamente. Debe ser único en todo el sistema.
                 </p>
               </div>
             ) : null}
 
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div>
-                <label htmlFor="checkpoint-latitude" className="label">
-                  Latitud {isNfcPoint ? "" : "*"}
-                </label>
-                <input
-                  id="checkpoint-latitude"
-                  type="number"
-                  step="any"
-                  min={-90}
-                  max={90}
-                  required={!isNfcPoint}
-                  value={form.latitude}
-                  onChange={(event) =>
-                    setForm((previous) => ({
-                      ...previous,
-                      latitude: event.target.value,
-                    }))
-                  }
-                  className="input"
-                  placeholder="40.4168"
-                />
-              </div>
-              <div>
-                <label htmlFor="checkpoint-longitude" className="label">
-                  Longitud {isNfcPoint ? "" : "*"}
-                </label>
-                <input
-                  id="checkpoint-longitude"
-                  type="number"
-                  step="any"
-                  min={-180}
-                  max={180}
-                  required={!isNfcPoint}
-                  value={form.longitude}
-                  onChange={(event) =>
-                    setForm((previous) => ({
-                      ...previous,
-                      longitude: event.target.value,
-                    }))
-                  }
-                  className="input"
-                  placeholder="-3.7038"
-                />
-              </div>
-              <div>
-                <label htmlFor="checkpoint-radius" className="label">
-                  Radio (m)
-                </label>
-                <input
-                  id="checkpoint-radius"
-                  type="number"
-                  min={10}
-                  max={1000}
-                  step={5}
-                  required
-                  value={form.geofence_radius_m}
-                  onChange={(event) =>
-                    setForm((previous) => ({
-                      ...previous,
-                      geofence_radius_m: event.target.value,
-                    }))
-                  }
-                  className="input"
-                />
-              </div>
-            </div>
-            <p className="-mt-1 text-xs text-slate-500">
-              {isNfcPoint
-                ? "En puntos NFC las coordenadas son opcionales: la etiqueta física confirma la ubicación."
-                : "Las coordenadas son obligatorias en puntos QR porque el móvil valida la distancia al marcar."}
-            </p>
+            {!isNfcPoint ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label htmlFor="checkpoint-latitude" className="label">
+                      Latitud (opcional)
+                    </label>
+                    <input
+                      id="checkpoint-latitude"
+                      type="number"
+                      step="any"
+                      min={-90}
+                      max={90}
+                      value={form.latitude}
+                      onChange={(event) =>
+                        setForm((previous) => ({
+                          ...previous,
+                          latitude: event.target.value,
+                        }))
+                      }
+                      className="input"
+                      placeholder="40.4168"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="checkpoint-longitude" className="label">
+                      Longitud (opcional)
+                    </label>
+                    <input
+                      id="checkpoint-longitude"
+                      type="number"
+                      step="any"
+                      min={-180}
+                      max={180}
+                      value={form.longitude}
+                      onChange={(event) =>
+                        setForm((previous) => ({
+                          ...previous,
+                          longitude: event.target.value,
+                        }))
+                      }
+                      className="input"
+                      placeholder="-3.7038"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="checkpoint-radius" className="label">
+                      Radio de geovalla (m)
+                    </label>
+                    <input
+                      id="checkpoint-radius"
+                      type="number"
+                      min={10}
+                      max={1000}
+                      step={5}
+                      required
+                      value={form.geofence_radius_m}
+                      onChange={(event) =>
+                        setForm((previous) => ({
+                          ...previous,
+                          geofence_radius_m: event.target.value,
+                        }))
+                      }
+                      className="input"
+                    />
+                  </div>
+                </div>
+                <p className="-mt-1 text-xs text-slate-500">
+                  Las coordenadas son opcionales. Si las deja vacías, el punto se
+                  crea igualmente y podrá completarlas después desde este panel o
+                  desde la app móvil antes de que los guardias marquen por QR.
+                </p>
+              </>
+            ) : null}
 
             <div>
               <label htmlFor="checkpoint-location" className="label">

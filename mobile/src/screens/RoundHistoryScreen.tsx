@@ -6,7 +6,7 @@
  * pantalla activa, donde el cronómetro y los checkpoints previos se restauran.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,10 +22,12 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { getErrorMessage } from '@/api/client';
 import { listRoundHistory, resumeRound } from '@/api/rounds';
 import type { RoundDetail, RoundStatus } from '@/api/types';
+import { CompanyPicker } from '@/components/company-picker';
 import { OfflineQueueBanner } from '@/components/offline-queue-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDateTime, formatDuration, formatTime } from '@/utils/datetime';
 
@@ -154,9 +156,17 @@ function HistoryCard({
 export default function RoundHistoryScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const { user } = useAuth();
+
+  /** Empresas activas asignadas; el filtro es opcional (null = todas). */
+  const companies = useMemo(
+    () => (user?.companies ?? []).filter((company) => company.is_active),
+    [user],
+  );
 
   const [filter, setFilter] = useState<FilterValue>('ALL');
   const [range, setRange] = useState<RangeValue>('24H');
+  const [companyFilterId, setCompanyFilterId] = useState<number | null>(null);
   const [rounds, setRounds] = useState<RoundDetail[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -169,6 +179,9 @@ export default function RoundHistoryScreen() {
   const hasLoadedRef = useRef(false);
   const previousFilterRef = useRef<FilterValue>('ALL');
   const previousRangeRef = useRef<RangeValue>('24H');
+  const previousCompanyRef = useRef<number | null>(null);
+  /** Descarta respuestas antiguas al cambiar de empresa, periodo o estado. */
+  const requestIdRef = useRef(0);
 
   const load = useCallback(
     async (
@@ -176,12 +189,22 @@ export default function RoundHistoryScreen() {
       targetPage: number,
       activeFilter: FilterValue,
       activeRange: RangeValue,
+      activeCompanyId: number | null,
     ) => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
+
       if (mode === 'initial') {
         setIsLoading(true);
+        setIsRefreshing(false);
+        setIsLoadingMore(false);
       } else if (mode === 'refresh') {
+        setIsLoading(false);
         setIsRefreshing(true);
+        setIsLoadingMore(false);
       } else {
+        setIsLoading(false);
+        setIsRefreshing(false);
         setIsLoadingMore(true);
       }
       setError(null);
@@ -195,7 +218,12 @@ export default function RoundHistoryScreen() {
           // defecto; «Todo» desactiva el filtro temporal.
           last_hours: activeRange === '24H' ? 24 : undefined,
           all_time: activeRange === 'ALL' ? true : undefined,
+          company_id: activeCompanyId ?? undefined,
         });
+
+        if (requestId !== requestIdRef.current) {
+          return;
+        }
 
         setRounds((current) =>
           targetPage === 1 ? response.items : [...current, ...response.items],
@@ -203,8 +231,14 @@ export default function RoundHistoryScreen() {
         setTotal(response.total);
         setPage(targetPage);
       } catch (loadError) {
-        setError(getErrorMessage(loadError));
+        if (requestId === requestIdRef.current) {
+          setError(getErrorMessage(loadError));
+        }
       } finally {
+        if (requestId !== requestIdRef.current) {
+          return;
+        }
+
         setIsLoading(false);
         setIsRefreshing(false);
         setIsLoadingMore(false);
@@ -217,17 +251,21 @@ export default function RoundHistoryScreen() {
   useFocusEffect(
     useCallback(() => {
       const queryChanged =
-        previousFilterRef.current !== filter || previousRangeRef.current !== range;
+        previousFilterRef.current !== filter ||
+        previousRangeRef.current !== range ||
+        previousCompanyRef.current !== companyFilterId;
       previousFilterRef.current = filter;
       previousRangeRef.current = range;
+      previousCompanyRef.current = companyFilterId;
 
       void load(
         queryChanged || !hasLoadedRef.current ? 'initial' : 'refresh',
         1,
         filter,
         range,
+        companyFilterId,
       );
-    }, [filter, range, load]),
+    }, [companyFilterId, filter, range, load]),
   );
 
   function goHome() {
@@ -296,7 +334,7 @@ export default function RoundHistoryScreen() {
           <RefreshControl
             refreshing={isRefreshing}
             onRefresh={() => {
-              void load('refresh', 1, filter, range);
+              void load('refresh', 1, filter, range, companyFilterId);
             }}
             tintColor={ACCENT}
             colors={[ACCENT]}
@@ -310,6 +348,24 @@ export default function RoundHistoryScreen() {
               Continúe una ronda pausada con su cronómetro y checkpoints ya
               marcados.
             </ThemedText>
+
+            {companies.length > 0 ? (
+              <>
+                <ThemedText type="code" themeColor="textSecondary">
+                  EMPRESA
+                </ThemedText>
+
+                <CompanyPicker
+                  companies={companies}
+                  selectedCompanyId={companyFilterId}
+                  onSelect={setCompanyFilterId}
+                  title="Filtrar historial por empresa"
+                  compact
+                  allowAll
+                  allLabel="Todas las empresas"
+                />
+              </>
+            ) : null}
 
             <ThemedText type="code" themeColor="textSecondary">
               PERIODO
@@ -416,7 +472,7 @@ export default function RoundHistoryScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Reintentar la carga del historial"
                 onPress={() => {
-                  void load('initial', 1, filter, range);
+                  void load('initial', 1, filter, range, companyFilterId);
                 }}
                 style={({ pressed }) => [
                   styles.retryButton,
@@ -437,7 +493,7 @@ export default function RoundHistoryScreen() {
               accessibilityState={{ disabled: isLoadingMore, busy: isLoadingMore }}
               disabled={isLoadingMore}
               onPress={() => {
-                void load('more', page + 1, filter, range);
+                void load('more', page + 1, filter, range, companyFilterId);
               }}
               style={({ pressed }) => [
                 styles.loadMoreButton,

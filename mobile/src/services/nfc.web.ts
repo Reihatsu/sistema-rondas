@@ -28,6 +28,14 @@ export interface NfcTagRead {
   techTypes: string[];
 }
 
+export interface NfcTagListenerOptions {
+  alertMessage?: string;
+}
+
+export interface NfcTagListener {
+  stop: () => Promise<void>;
+}
+
 interface ReadNfcTagOptions {
   timeoutMs?: number;
   alertMessage?: string;
@@ -39,6 +47,13 @@ const WEB_UNSUPPORTED_MESSAGE =
 /** En web nunca hay lector NFC. */
 export async function isNfcSupported(): Promise<boolean> {
   return false;
+}
+
+export async function startNfcTagListener(
+  _onTag: (tag: NfcTagRead) => void,
+  _options: NfcTagListenerOptions = {},
+): Promise<NfcTagListener> {
+  throw new NfcError('unsupported', WEB_UNSUPPORTED_MESSAGE);
 }
 
 export async function readNfcTag(

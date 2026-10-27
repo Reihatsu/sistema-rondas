@@ -1,13 +1,17 @@
 /**
  * Lectura de etiquetas NFC de puntos de control.
  *
- * Envuelve `react-native-nfc-manager` en una única llamada asíncrona:
- * `readNfcTag()` inicia la sesión, espera la primera etiqueta, devuelve su UID
- * canónico y cierra la sesión. La versión web (`nfc.web.ts`) expone la misma
- * API pero siempre informa que el dispositivo no tiene NFC.
+ * Expone dos modos:
+ * - `readNfcTag()`: sesión de una sola lectura para el escaneo manual.
+ * - `startNfcTagListener()`: modo lector pasivo que mantiene la sesión abierta
+ *   y entrega cada etiqueta detectada, usado por la pantalla de ronda activa.
+ *
+ * La versión web (`nfc.web.ts`) expone la misma API pero siempre informa que el
+ * dispositivo no tiene NFC.
  */
 
-import NfcManager, { NfcEvents } from 'react-native-nfc-manager';
+import NfcManager, { NfcAdapter, NfcEvents } from 'react-native-nfc-manager';
+import type { TagEvent } from 'react-native-nfc-manager';
 
 import { canonicalNfcUid } from '@/services/nfcUid';
 
@@ -35,6 +39,21 @@ export interface NfcTagRead {
   uid: string;
   /** Tecnologías detectadas por el sistema (solo informativo). */
   techTypes: string[];
+}
+
+export interface NfcTagListenerOptions {
+  /** Mensaje del diálogo nativo de iOS mientras el lector está activo. */
+  alertMessage?: string;
+}
+
+/**
+ * Sesión NFC pasiva activa.
+ *
+ * `stop()` es idempotente: puede llamarse al desmontar la pantalla, al pausar
+ * la ronda o después de un error sin lanzar excepciones.
+ */
+export interface NfcTagListener {
+  stop: () => Promise<void>;
 }
 
 interface ReadNfcTagOptions {
@@ -87,6 +106,93 @@ async function ensureNfcEnabled(): Promise<void> {
       'El NFC está desactivado. Actívelo en los ajustes del dispositivo.',
     );
   }
+}
+
+/**
+ * Inicia una sesión NFC pasiva que entrega cada etiqueta detectada.
+ *
+ * Se usa en la pantalla de ronda activa para que el guardia solo acerque el
+ * móvil a la etiqueta, sin pulsar ningún botón. En Android se activa el modo
+ * lector nativo con las tecnologías más comunes; en iOS se muestra el diálogo
+ * de `NFCTagReaderSession`. La sesión permanece abierta hasta llamar a
+ * `stop()`, que debe ejecutarse al pausar/finalizar la ronda o desmontar la
+ * pantalla.
+ */
+export async function startNfcTagListener(
+  onTag: (tag: NfcTagRead) => void,
+  options: NfcTagListenerOptions = {},
+): Promise<NfcTagListener> {
+  await ensureNfcEnabled();
+
+  let stopped = false;
+
+  const handleDiscoverTag = (tag: TagEvent) => {
+    if (stopped) {
+      return;
+    }
+
+    const uid = canonicalNfcUid(tag?.id);
+
+    if (!uid) {
+      // Una etiqueta ilegible no debe cerrar la sesión: se ignora para que el
+      // guardia pueda acercar otra sin reiniciar el lector.
+      console.warn('[nfc] Etiqueta sin UID legible:', tag);
+      return;
+    }
+
+    onTag({ uid, techTypes: tag?.techTypes ?? [] });
+  };
+
+  NfcManager.setEventListener(NfcEvents.DiscoverTag, handleDiscoverTag);
+
+  try {
+    await NfcManager.registerTagEvent({
+      alertMessage: options.alertMessage ?? DEFAULT_ALERT_MESSAGE,
+      // Mantiene la sesión abierta después de cada lectura para el modo pasivo.
+      invalidateAfterFirstRead: false,
+      isReaderModeEnabled: true,
+      readerModeFlags:
+        NfcAdapter.FLAG_READER_NFC_A |
+        NfcAdapter.FLAG_READER_NFC_B |
+        NfcAdapter.FLAG_READER_NFC_F |
+        NfcAdapter.FLAG_READER_NFC_V |
+        NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+      // Pequeña espera para no bombardear con la misma etiqueta si permanece
+      // apoyada sobre el lector.
+      readerModeDelay: 500,
+    });
+  } catch (error) {
+    NfcManager.setEventListener(NfcEvents.DiscoverTag, null);
+
+    try {
+      await NfcManager.unregisterTagEvent();
+    } catch {
+      // La sesión no llegó a abrirse; no hay nada más que limpiar.
+    }
+
+    const detail = error instanceof Error ? ` (${error.message})` : '';
+    throw new NfcError(
+      'read',
+      `No se pudo iniciar el lector NFC${detail}. Intente de nuevo.`,
+    );
+  }
+
+  return {
+    stop: async () => {
+      if (stopped) {
+        return;
+      }
+
+      stopped = true;
+      NfcManager.setEventListener(NfcEvents.DiscoverTag, null);
+
+      try {
+        await NfcManager.unregisterTagEvent();
+      } catch (error) {
+        console.warn('[nfc] No se pudo cerrar el lector NFC:', error);
+      }
+    },
+  };
 }
 
 /**

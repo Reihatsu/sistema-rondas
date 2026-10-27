@@ -20,6 +20,7 @@ import {
   Pressable,
   RefreshControl,
   StyleSheet,
+  Vibration,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -29,6 +30,7 @@ import { getErrorMessage } from '@/api/client';
 import {
   addRoundComment,
   cancelRound,
+  checkIn,
   getActiveRound,
   getRound,
   listRoundCheckpoints,
@@ -50,8 +52,13 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
+import { useOfflineQueue } from '@/hooks/use-offline-queue';
 import { useTheme } from '@/hooks/use-theme';
 import { cacheRoundCheckpoints } from '@/services/checkpointCache';
+import { getCurrentCoordinates, type CurrentCoordinates } from '@/services/location';
+import { startNfcTagListener, type NfcTagListener } from '@/services/nfc';
+import { canonicalNfcUid, formatNfcUid } from '@/services/nfcUid';
+import { isNetworkRequestError } from '@/services/offlineQueue';
 import { formatClock, formatDuration, formatTime, secondsUntil } from '@/utils/datetime';
 
 const ACCENT = '#208AEF';
@@ -84,6 +91,13 @@ const ROUND_STATUS_COLORS: Record<RoundStatus, string> = {
 
 type PromptKind = 'pause' | 'cancel' | 'comment';
 type BusyAction = 'none' | 'starting' | 'pausing' | 'resuming' | 'cancelling' | 'commenting';
+type NfcReaderStatus = 'idle' | 'starting' | 'listening' | 'error';
+type NfcFeedbackTone = 'info' | 'success' | 'error';
+
+interface NfcFeedback {
+  tone: NfcFeedbackTone;
+  message: string;
+}
 
 function isInactivityMessage(message: string): boolean {
   return /inactividad/i.test(message);
@@ -244,6 +258,19 @@ export default function RondasScreen() {
   const [prompt, setPrompt] = useState<PromptKind | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
+  const [isScreenFocused, setIsScreenFocused] = useState(true);
+  const [nfcReaderStatus, setNfcReaderStatus] = useState<NfcReaderStatus>('idle');
+  const [nfcFeedback, setNfcFeedback] = useState<NfcFeedback | null>(null);
+  const [nfcRetryToken, setNfcRetryToken] = useState(0);
+
+  const { enqueue: queueCheckIn, isOnline } = useOfflineQueue();
+
+  // Referencias estables para que el lector NFC no se reinicie cada vez que
+  // cambian los checkpoints o el estado de la ronda.
+  const roundRef = useRef<RoundDetail | null>(null);
+  const checkpointsRef = useRef<RoundCheckpoint[]>([]);
+  const nfcSubmittingRef = useRef(false);
+  const lastNfcTagRef = useRef<{ uid: string; at: number } | null>(null);
 
   // Base del cronómetro: tiempo del backend + instante local de sincronización.
   const timerBaseRef = useRef<{ elapsed: number; at: number } | null>(null);
@@ -346,9 +373,25 @@ export default function RondasScreen() {
   // Al volver del escáner se recarga en silencio para actualizar los estados.
   useFocusEffect(
     useCallback(() => {
+      setIsScreenFocused(true);
       void load(hasLoadedRef.current ? 'refresh' : 'initial');
+
+      return () => {
+        // Evita que el lector siga activo al abrir otra pantalla encima.
+        setIsScreenFocused(false);
+      };
     }, [load]),
   );
+
+  // Las referencias permiten que el callback NFC use siempre los últimos datos
+  // sin reiniciar la sesión del lector en cada marcación.
+  useEffect(() => {
+    roundRef.current = round;
+  }, [round]);
+
+  useEffect(() => {
+    checkpointsRef.current = checkpoints;
+  }, [checkpoints]);
 
   // El cronómetro avanza cada segundo solo mientras la ronda está en curso.
   useEffect(() => {
@@ -410,6 +453,185 @@ export default function RondasScreen() {
   const scanPointType: PointType =
     round?.company?.point_type ?? selectedCompany?.point_type ?? 'QR';
 
+  /**
+   * Procesa una etiqueta leída en modo pasivo: busca el punto por UID y reutiliza
+   * exactamente el mismo flujo de marcación que el escáner QR (API + cola
+   * offline). El GPS es opcional en NFC, por lo que un fallo de ubicación no
+   * impide registrar la visita.
+   */
+  const handleNfcTag = useCallback(
+    async (tag: { uid: string; techTypes: string[] }) => {
+      if (nfcSubmittingRef.current) {
+        return;
+      }
+
+      const currentRound = roundRef.current;
+
+      if (!currentRound || currentRound.status !== 'IN_PROGRESS') {
+        return;
+      }
+
+      const normalizedUid = canonicalNfcUid(tag.uid);
+      const checkpoint = checkpointsRef.current.find((item) =>
+        canonicalNfcUid(item.uid_nfc) === normalizedUid,
+      );
+
+      if (!checkpoint) {
+        Vibration.vibrate([0, 80, 60, 80]);
+        setNfcFeedback({
+          tone: 'error',
+          message: `La etiqueta ${formatNfcUid(normalizedUid)} no pertenece a esta ronda. Acerque una etiqueta registrada.`,
+        });
+        return;
+      }
+
+      if (checkpoint.is_visited) {
+        Vibration.vibrate(120);
+        setNfcFeedback({
+          tone: 'info',
+          message: `${checkpoint.name} ya fue marcado. Acérquese al siguiente punto.`,
+        });
+        return;
+      }
+
+      nfcSubmittingRef.current = true;
+      Vibration.vibrate(60);
+      setNfcFeedback({
+        tone: 'info',
+        message: `Etiqueta leída: ${checkpoint.name}. Registrando marcación…`,
+      });
+
+      // El NFC no depende del GPS; si el permiso o el servicio fallan, se envía
+      // la marcación sin coordenadas para no bloquear al guardia.
+      let coordinates: CurrentCoordinates | null = null;
+      try {
+        coordinates = await getCurrentCoordinates();
+      } catch (locationError) {
+        console.warn('[rondas] NFC sin coordenadas:', locationError);
+      }
+
+      try {
+        const timestamp = new Date().toISOString();
+        const queueForLater = async () => {
+          await queueCheckIn({
+            round_id: currentRound.id,
+            checkpoint_id: checkpoint.id,
+            checkpoint_name: checkpoint.name,
+            nfc_uid: normalizedUid,
+            latitude: coordinates?.latitude ?? null,
+            longitude: coordinates?.longitude ?? null,
+            timestamp,
+          });
+
+          Vibration.vibrate([0, 60, 60, 60]);
+          setNfcFeedback({
+            tone: 'success',
+            message: `${checkpoint.name}: marcación guardada en la cola offline. Se enviará automáticamente al recuperar la conexión.`,
+          });
+        };
+
+        if (!isOnline) {
+          await queueForLater();
+          return;
+        }
+
+        try {
+          const response = await checkIn(currentRound.id, {
+            nfc_uid: normalizedUid,
+            latitude: coordinates?.latitude ?? null,
+            longitude: coordinates?.longitude ?? null,
+            timestamp,
+          });
+
+          Vibration.vibrate([0, 60, 60, 60]);
+          setNfcFeedback({
+            tone: 'success',
+            message: response.round_completed
+              ? `¡Ronda completada! ${checkpoint.name} fue el último punto.`
+              : `${checkpoint.name}: ${response.message}`,
+          });
+
+          await load('refresh');
+        } catch (requestError) {
+          if (!isNetworkRequestError(requestError)) {
+            throw requestError;
+          }
+
+          await queueForLater();
+        }
+      } catch (tagError) {
+        Vibration.vibrate([0, 120, 80, 120]);
+        setNfcFeedback({ tone: 'error', message: getErrorMessage(tagError) });
+      } finally {
+        nfcSubmittingRef.current = false;
+      }
+    },
+    [isOnline, load, queueCheckIn],
+  );
+
+  // Lector NFC pasivo: permanece activo mientras la ronda está en curso y la
+  // pantalla tiene el foco. El guardia solo acerca el móvil a la etiqueta.
+  useEffect(() => {
+    if (!isInProgress || !isScreenFocused || scanPointType !== 'NFC' || !canScan) {
+      setNfcReaderStatus('idle');
+      return;
+    }
+
+    let cancelled = false;
+    let listener: NfcTagListener | null = null;
+
+    setNfcReaderStatus('starting');
+    setNfcFeedback(null);
+
+    void startNfcTagListener(
+      (tag) => {
+        if (cancelled) {
+          return;
+        }
+
+        const now = Date.now();
+        const previous = lastNfcTagRef.current;
+
+        // La misma etiqueta puede notificarse varias veces si se deja apoyada
+        // sobre el lector; se ignora durante unos segundos.
+        if (previous?.uid === tag.uid && now - previous.at < 3000) {
+          return;
+        }
+
+        lastNfcTagRef.current = { uid: tag.uid, at: now };
+        void handleNfcTag(tag);
+      },
+      {
+        alertMessage: 'Acerque el móvil a la etiqueta NFC del punto de control',
+      },
+    )
+      .then((activeListener) => {
+        if (cancelled) {
+          void activeListener.stop();
+          return;
+        }
+
+        listener = activeListener;
+        setNfcReaderStatus('listening');
+      })
+      .catch((readerError: unknown) => {
+        if (cancelled) {
+          return;
+        }
+
+        setNfcReaderStatus('error');
+        setNfcFeedback({
+          tone: 'error',
+          message: getErrorMessage(readerError),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+      void listener?.stop();
+    };
+  }, [canScan, handleNfcTag, isInProgress, isScreenFocused, nfcRetryToken, scanPointType]);
+
   const timerBase = timerBaseRef.current;
   const elapsedSeconds = round
     ? timerBase
@@ -422,6 +644,26 @@ export default function RondasScreen() {
     isInProgress && round?.inactivity_deadline
       ? secondsUntil(round.inactivity_deadline)
       : null;
+
+  const nfcToneColor =
+    nfcReaderStatus === 'error' || nfcFeedback?.tone === 'error'
+      ? DANGER
+      : nfcReaderStatus === 'listening'
+        ? ACCENT
+        : theme.textSecondary;
+
+  const nfcStatusLabel =
+    nfcReaderStatus === 'starting'
+      ? 'Iniciando lector NFC…'
+      : nfcReaderStatus === 'error'
+        ? 'No se pudo activar el lector NFC'
+        : nfcReaderStatus === 'listening'
+          ? 'Lector NFC activo: acerque el móvil a la etiqueta'
+          : allVisited
+            ? 'Ronda completa'
+            : total === 0
+              ? 'Esta ronda no tiene puntos de control'
+              : 'Lector NFC inactivo';
 
   const handleActionError = useCallback(
     (actionError: unknown): string => {
@@ -440,7 +682,8 @@ export default function RondasScreen() {
 
 
   function openScanner() {
-    if (!round || !canScan) {
+    // El modo NFC es pasivo: no abre otra pantalla, el lector ya está activo.
+    if (!round || !canScan || scanPointType !== 'QR') {
       return;
     }
 
@@ -959,15 +1202,11 @@ export default function RondasScreen() {
 
         {renderBody()}
 
-        {round && isInProgress ? (
+        {round && isInProgress && scanPointType === 'QR' ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={
-              allVisited
-                ? 'Ronda completa'
-                : scanPointType === 'NFC'
-                  ? 'Leer etiqueta NFC de checkpoint'
-                  : 'Escanear checkpoint QR'
+              allVisited ? 'Ronda completa' : 'Escanear checkpoint QR'
             }
             accessibilityState={{ disabled: !canScan }}
             disabled={!canScan}
@@ -986,11 +1225,70 @@ export default function RondasScreen() {
                 ? 'Ronda completa'
                 : total === 0
                   ? 'Sin puntos de control'
-                  : scanPointType === 'NFC'
-                    ? 'Leer Etiqueta NFC'
-                    : 'Escanear Checkpoint (QR)'}
+                  : 'Escanear Checkpoint (QR)'}
             </ThemedText>
           </Pressable>
+        ) : null}
+
+        {round && isInProgress && scanPointType === 'NFC' ? (
+          <View
+            accessibilityRole="status"
+            style={[
+              styles.fab,
+              styles.nfcDock,
+              {
+                backgroundColor: theme.backgroundElement,
+                borderColor: nfcToneColor,
+              },
+            ]}>
+            <View style={styles.nfcStatusRow}>
+              {nfcReaderStatus === 'starting' ? (
+                <ActivityIndicator size="small" color={ACCENT} />
+              ) : (
+                <View
+                  style={[styles.nfcDot, { backgroundColor: nfcToneColor }]}
+                />
+              )}
+              <ThemedText
+                type="smallBold"
+                style={[styles.nfcStatusText, { color: nfcToneColor }]}>
+                {nfcStatusLabel}
+              </ThemedText>
+            </View>
+
+            {nfcFeedback ? (
+              <ThemedText
+                type="small"
+                style={[
+                  styles.nfcFeedback,
+                  {
+                    color:
+                      nfcFeedback.tone === 'error'
+                        ? DANGER
+                        : nfcFeedback.tone === 'success'
+                          ? SUCCESS
+                          : theme.textSecondary,
+                  },
+                ]}>
+                {nfcFeedback.message}
+              </ThemedText>
+            ) : null}
+
+            {nfcReaderStatus === 'error' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Reintentar lector NFC"
+                onPress={() => setNfcRetryToken((value) => value + 1)}
+                style={({ pressed }) => [
+                  styles.nfcRetry,
+                  { borderColor: DANGER, opacity: pressed ? 0.7 : 1 },
+                ]}>
+                <ThemedText type="smallBold" style={styles.dangerText}>
+                  Reintentar lector
+                </ThemedText>
+              </Pressable>
+            ) : null}
+          </View>
         ) : null}
 
         {isPaused ? (
@@ -1223,6 +1521,42 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
+  },
+  nfcDock: {
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
+    borderWidth: 1,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    gap: Spacing.half,
+  },
+  nfcStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+  },
+  nfcDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  nfcStatusText: {
+    flexShrink: 1,
+    textAlign: 'center',
+  },
+  nfcFeedback: {
+    textAlign: 'center',
+  },
+  nfcRetry: {
+    alignSelf: 'center',
+    marginTop: Spacing.half,
+    minHeight: 36,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
 

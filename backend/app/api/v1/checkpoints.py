@@ -134,9 +134,11 @@ def create_checkpoint(
 ) -> CheckpointRead:
     """Crea un punto validando empresa, tipo y unicidad.
 
-    * En empresas ``NFC`` el ``uid_nfc`` es obligatorio y el código se genera
-      automáticamente si no se envía.
+    * ``uid_nfc`` es opcional incluso en empresas ``NFC``: el punto puede
+      crearse antes de instalar o programar la etiqueta y completarse después.
     * En empresas ``QR`` cualquier ``uid_nfc`` recibido se ignora.
+    * ``latitude`` y ``longitude`` son opcionales; solo se usan para la
+      geovalla de los puntos QR.
     """
     company = crud_company.get_company(db, payload.company_id)
     if company is None:
@@ -145,15 +147,6 @@ def create_checkpoint(
             detail="Empresa no encontrada",
         )
     ensure_company_access(current_user, company.id)
-
-    if company.point_type is PointType.NFC and payload.uid_nfc is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Esta empresa usa etiquetas NFC: indique el UID de la etiqueta "
-                "del punto de control."
-            ),
-        )
 
     uid_nfc = payload.uid_nfc if company.point_type is PointType.NFC else None
     code = payload.code or crud_checkpoint.generate_checkpoint_code(
@@ -202,6 +195,17 @@ def update_checkpoint(
 
     data = payload.model_dump(exclude_unset=True)
 
+    # La geovalla necesita ambas coordenadas. En una actualización parcial se
+    # valida el estado final combinando el payload con lo ya guardado.
+    if "latitude" in data or "longitude" in data:
+        target_latitude = data.get("latitude", checkpoint.latitude)
+        target_longitude = data.get("longitude", checkpoint.longitude)
+        if (target_latitude is None) != (target_longitude is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Debe indicar latitud y longitud juntas",
+            )
+
     # La empresa destino define la tecnología del punto. Al mover un punto de
     # empresa (o al cambiar el tipo de la empresa) se ajusta el UID NFC.
     target_company_id = data.get("company_id") or checkpoint.company_id
@@ -221,15 +225,9 @@ def update_checkpoint(
         data.pop("code")
 
     if target_company.point_type is PointType.NFC:
+        # El UID es opcional: se puede limpiar o completar en cualquier
+        # momento sin bloquear la edición del resto del punto.
         target_uid = data.get("uid_nfc", checkpoint.uid_nfc)
-        if target_uid is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "Esta empresa usa etiquetas NFC: indique el UID de la "
-                    "etiqueta del punto de control."
-                ),
-            )
     else:
         target_uid = None
 

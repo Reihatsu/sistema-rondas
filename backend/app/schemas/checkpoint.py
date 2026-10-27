@@ -51,8 +51,8 @@ class CheckpointBase(BaseModel):
         ge=-90,
         le=90,
         description=(
-            "Latitud del punto; necesaria para validar la marcación por QR. "
-            "En empresas NFC es opcional."
+            "Latitud opcional del punto. Solo se usa en puntos QR para validar "
+            "la geovalla; puede completarse después desde el panel o la app."
         ),
     )
     longitude: float | None = Field(
@@ -60,8 +60,8 @@ class CheckpointBase(BaseModel):
         ge=-180,
         le=180,
         description=(
-            "Longitud del punto; necesaria para validar la marcación por QR. "
-            "En empresas NFC es opcional."
+            "Longitud opcional del punto. Solo se usa en puntos QR para validar "
+            "la geovalla; puede completarse después desde el panel o la app."
         ),
     )
     geofence_radius_m: int = Field(
@@ -75,9 +75,10 @@ class CheckpointBase(BaseModel):
 class CheckpointCreate(CheckpointBase):
     """Payload para crear un punto de control.
 
-    ``code`` es opcional: si se omite, el servidor genera un código único con
-    el prefijo del tipo de punto de la empresa (``QR-EMP1-PT04`` o
-    ``NFC-EMP2-PT01``). ``uid_nfc`` es obligatorio en empresas NFC.
+    ``code`` y ``uid_nfc`` son opcionales: si se omite el código, el servidor
+    genera uno único con el prefijo del tipo de punto de la empresa
+    (``QR-EMP1-PT04`` o ``NFC-EMP2-PT01``). El UID puede registrarse después,
+    cuando se instale o programe la etiqueta física.
     """
 
     company_id: int = Field(gt=0)
@@ -92,7 +93,10 @@ class CheckpointCreate(CheckpointBase):
         default=None,
         max_length=100,
         examples=["04A23B4C5D6E"],
-        description="UID de la etiqueta NFC; obligatorio en empresas con tipo NFC.",
+        description=(
+            "UID opcional de la etiqueta NFC. Puede registrarse después de "
+            "crear el punto."
+        ),
     )
     is_active: bool = True
 

@@ -122,6 +122,8 @@ export async function startNewRound(companyId?: number): Promise<RoundDetail> {
 export interface ListRoundHistoryParams {
   page?: number;
   page_size?: number;
+  /** Limita el historial a una empresa asignada al usuario. */
+  company_id?: number;
   /** Si se omite, el backend devuelve pausadas, completadas y canceladas. */
   status?: RoundStatus;
   /** Fecha/hora ISO 8601 sobre `created_at`. */
