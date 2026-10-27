@@ -5,16 +5,19 @@
  * etiqueta detectada; la usa la pantalla de ronda activa para que el guardia
  * solo acerque el móvil, sin pulsar ningún botón.
  *
- * Android exige `readerModeFlags` distintos de cero cuando
- * `isReaderModeEnabled` es `true`; pasar `0` lanza una excepción nativa que el
- * módulo no siempre convierte en error de JavaScript y puede cerrar la app.
- * Aquí las flags se definen una sola vez y se usan en todas las lecturas.
+ * En Android se usa el despacho en primer plano (`enableForegroundDispatch`),
+ * que es el modo por defecto de `registerTagEvent`. No se activa el modo lector
+ * nativo (`enableReaderMode`): en Android 16 y en algunos servicios NFC de
+ * fabricantes ese cambio de estado lanza una excepción nativa que no se puede
+ * capturar desde JavaScript y Android cierra la aplicación. El despacho en
+ * primer plano es igualmente pasivo mientras la pantalla de la ronda está
+ * enfocada y es el camino estable de la librería.
  *
  * La versión web (`nfc.web.ts`) expone la misma API pero siempre informa que el
  * dispositivo no tiene NFC.
  */
 
-import NfcManager, { NfcAdapter, NfcEvents } from 'react-native-nfc-manager';
+import NfcManager, { NfcEvents } from 'react-native-nfc-manager';
 import type { TagEvent } from 'react-native-nfc-manager';
 
 import { canonicalNfcUid } from '@/services/nfcUid';
@@ -57,18 +60,6 @@ export interface NfcTagListener {
 
 const DEFAULT_ALERT_MESSAGE =
   'Acerca el móvil a la etiqueta NFC del punto de control';
-const READER_MODE_DELAY_MS = 500;
-
-/**
- * Tecnologías que el lector acepta. `SKIP_NDEF_CHECK` evita que Android intente
- * parsear el NDEF antes de entregar el UID, que es lo único que necesita la app.
- */
-const NFC_READER_MODE_FLAGS =
-  NfcAdapter.FLAG_READER_NFC_A |
-  NfcAdapter.FLAG_READER_NFC_B |
-  NfcAdapter.FLAG_READER_NFC_F |
-  NfcAdapter.FLAG_READER_NFC_V |
-  NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK;
 
 let managerStarted = false;
 let managerStartPromise: Promise<void> | null = null;
@@ -163,11 +154,10 @@ async function ensureNfcEnabled(): Promise<void> {
  * Inicia una sesión NFC pasiva que entrega cada etiqueta detectada.
  *
  * Se usa en la pantalla de ronda activa para que el guardia solo acerque el
- * móvil a la etiqueta, sin pulsar ningún botón. En Android se activa el modo
- * lector nativo con las tecnologías más comunes; en iOS se muestra el diálogo
- * de `NFCTagReaderSession`. La sesión permanece abierta hasta llamar a
- * `stop()`, que debe ejecutarse al pausar/finalizar la ronda o desmontar la
- * pantalla.
+ * móvil a la etiqueta, sin pulsar ningún botón. En Android se registra el
+ * despacho en primer plano; en iOS se muestra el diálogo de
+ * `NFCTagReaderSession`. La sesión permanece abierta hasta llamar a `stop()`,
+ * que debe ejecutarse al pausar/finalizar la ronda o desmontar la pantalla.
  *
  * Solo puede existir una sesión activa: antes de registrar la nueva se cierra
  * la anterior y todas las operaciones se serializan en `sessionQueue`.
@@ -177,17 +167,10 @@ export async function startNfcTagListener(
   options: NfcTagListenerOptions = {},
 ): Promise<NfcTagListener> {
   return enqueueSession(async () => {
-    // Salvaguarda: nunca se llama a `registerTagEvent` en modo lector con 0
-    // flags, aunque una versión futura del paquete deje de exportar constantes.
-    if (!NFC_READER_MODE_FLAGS) {
-      throw new NfcError(
-        'read',
-        'El lector NFC no está disponible en este dispositivo. Use el escaneo de código QR.',
-      );
-    }
-
-    await ensureNfcEnabled();
+    // Cierra cualquier sesión anterior aunque el NFC se haya desactivado: así
+    // no queda un lector colgado esperando una etiqueta.
     await closeActiveSession();
+    await ensureNfcEnabled();
 
     let stopped = false;
 
@@ -211,16 +194,13 @@ export async function startNfcTagListener(
     NfcManager.setEventListener(NfcEvents.DiscoverTag, handleDiscoverTag);
 
     try {
+      // Sin `isReaderModeEnabled`: Android usa el despacho en primer plano.
+      // Es pasivo, entrega el UID y evita el cierre nativo de `enableReaderMode`
+      // que ocurre en algunos dispositivos con Android 16.
       await NfcManager.registerTagEvent({
         alertMessage: options.alertMessage ?? DEFAULT_ALERT_MESSAGE,
         // Mantiene la sesión abierta después de cada lectura para el modo pasivo.
         invalidateAfterFirstRead: false,
-        isReaderModeEnabled: true,
-        // Nunca debe llegar 0: Android lanza una excepción nativa en ese caso.
-        readerModeFlags: NFC_READER_MODE_FLAGS,
-        // Pequeña espera para no bombardear con la misma etiqueta si permanece
-        // apoyada sobre el lector.
-        readerModeDelay: READER_MODE_DELAY_MS,
       });
     } catch (error) {
       NfcManager.setEventListener(NfcEvents.DiscoverTag, null);
