@@ -100,14 +100,16 @@ DEMO_CHECKPOINTS: tuple[dict[str, Any], ...] = (
     },
 )
 
-#: Puntos NFC demo. ``uid_nfc`` es el UID físico de la etiqueta; se guarda
-#: normalizado (hex en mayúsculas y sin separadores). La numeración de los
-#: códigos corresponde a una base recién sembrada, donde esta es la empresa 2.
+#: Puntos NFC demo. ``uid_nfc`` es el UID físico de la etiqueta real del
+#: cliente; se guarda normalizado (hex en mayúsculas y sin separadores). El
+#: texto NDEF de cada etiqueta debe grabarse con el ``code`` del punto
+#: (``NFC-EMP2-PT01``, etc.). La numeración de los códigos corresponde a una
+#: base recién sembrada, donde esta es la empresa 2.
 DEMO_NFC_CHECKPOINTS: tuple[dict[str, Any], ...] = (
     {
         "name": "Portal Marítimo",
         "code": "NFC-EMP2-PT01",
-        "uid_nfc": "04A23B4C5D6E80",
+        "uid_nfc": "0439D3A2064F80",
         "location_description": (
             "Torno peatonal del portal marítimo, junto al control de accesos."
         ),
@@ -118,7 +120,7 @@ DEMO_NFC_CHECKPOINTS: tuple[dict[str, Any], ...] = (
     {
         "name": "Muelle de Carga",
         "code": "NFC-EMP2-PT02",
-        "uid_nfc": "04B34C5D6E7F91",
+        "uid_nfc": "04B830A2064F80",
         "location_description": (
             "Etiqueta adherida a la columna 4 del muelle de carga, sector norte."
         ),
@@ -129,7 +131,7 @@ DEMO_NFC_CHECKPOINTS: tuple[dict[str, Any], ...] = (
     {
         "name": "Cuarto de Máquinas",
         "code": "NFC-EMP2-PT03",
-        "uid_nfc": "04C45D6E7F80A2",
+        "uid_nfc": "0491D8A2064F80",
         "location_description": (
             "Puerta del cuarto de máquinas, nivel sótano del edificio técnico."
         ),
@@ -137,6 +139,13 @@ DEMO_NFC_CHECKPOINTS: tuple[dict[str, Any], ...] = (
         "longitude": -0.332100,
         "geofence_radius_m": 30,
     },
+)
+
+#: UID ficticios de versiones anteriores del seed. Al volver a sembrar una base
+#: existente se reemplazan por las etiquetas reales; un UID configurado por el
+#: cliente (distinto de estos) nunca se sobrescribe.
+LEGACY_DEMO_NFC_UIDS = frozenset(
+    {"04C45D6E7F80A2", "04A23B4C5D6E80", "04B34C5D6E7F91"}
 )
 
 #: Usuarios de demostración (contraseñas en texto plano solo para el seed).
@@ -389,8 +398,9 @@ def _seed_checkpoints(
     """Crea los puntos demo que falten y completa sus datos físicos.
 
     En bases sembradas antes de la geovalla se completan las coordenadas y, en
-    empresas NFC, el ``uid_nfc`` de cada etiqueta sin sobrescribir lo que haya
-    configurado el cliente.
+    empresas NFC, el ``uid_nfc`` de cada etiqueta. Los UID ficticios de seeds
+    anteriores se actualizan a las etiquetas reales; un UID configurado por el
+    cliente se respeta.
     """
     existing = {
         checkpoint.code: checkpoint
@@ -416,7 +426,10 @@ def _seed_checkpoints(
             ):
                 checkpoint.latitude = float(spec["latitude"])
                 checkpoint.longitude = float(spec["longitude"])
-            if uid_nfc is not None and checkpoint.uid_nfc is None:
+            if uid_nfc is not None and (
+                checkpoint.uid_nfc is None
+                or checkpoint.uid_nfc in LEGACY_DEMO_NFC_UIDS
+            ):
                 checkpoint.uid_nfc = str(uid_nfc)
             continue
 

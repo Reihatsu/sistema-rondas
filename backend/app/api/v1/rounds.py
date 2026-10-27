@@ -7,10 +7,11 @@ Cubre el flujo operativo completo del guardia:
   la empresa (QR o NFC) desde la app móvil.
 * Inicio de rondas asignadas, pausa (con motivo obligatorio), reanudación y
   cancelación.
-* Marcación por QR (código impreso + GPS) o por NFC (UID de la etiqueta, con
-  GPS opcional), tiempos por tramo y cierre automático de la ronda al visitar
-  el último checkpoint. La proximidad al punto solo se exige si
-  ``ENFORCE_CHECKPOINT_GEOFENCE`` está activo.
+* Marcación por QR (código impreso + GPS) o por NFC (texto NDEF de la etiqueta
+  y UID físico como validación secundaria, con GPS opcional), tiempos por tramo
+  y cierre automático de la ronda al visitar el último checkpoint. La
+  proximidad al punto solo se exige si ``ENFORCE_CHECKPOINT_GEOFENCE`` está
+  activo.
 * Cancelación automática cuando pasan más de
   ``ROUND_INACTIVITY_TIMEOUT_MINUTES`` minutos sin actividad.
 """
@@ -38,6 +39,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.schemas.checkpoint import normalize_uid
 from app.schemas.common import Paginated
 from app.schemas.round import (
     RoundCancelCreate,
@@ -268,14 +270,63 @@ def _lookup_checkpoint(
 ) -> Checkpoint | None:
     """Resuelve el punto marcado según el identificador enviado.
 
-    El UID NFC ya llega normalizado por el esquema (hex en mayúsculas y sin
-    separadores), igual que se guarda en la base de datos.
+    Prioridad:
+
+    1. ``nfc_code``: texto NDEF de la etiqueta, que debe ser el código del
+       punto. Es el identificador principal de las marcaciones NFC.
+    2. ``nfc_uid``: UID físico, usado por clientes que aún no envían el texto.
+    3. ``qr_code``: contenido del código QR.
+
+    ``nfc_code`` y ``qr_code`` llegan normalizados por el esquema (sin espacios
+    externos y en mayúsculas); el UID NFC llega como hexadecimal en mayúsculas
+    y sin separadores, igual que se guarda en la base de datos.
     """
+    if payload.nfc_code is not None:
+        return crud_checkpoint.get_checkpoint_by_code(db, payload.nfc_code)
     if payload.nfc_uid is not None:
         return crud_checkpoint.get_checkpoint_by_uid(db, payload.nfc_uid)
     if payload.qr_code is not None:
         return crud_checkpoint.get_checkpoint_by_code(db, payload.qr_code)
     return None
+
+
+def _format_nfc_uid(uid: str) -> str:
+    """Presenta un UID NFC agrupado en pares para los mensajes de error."""
+    return " ".join(uid[index : index + 2] for index in range(0, len(uid), 2))
+
+
+def _ensure_nfc_uid_matches(
+    checkpoint: Checkpoint,
+    payload: RoundCheckInCreate,
+) -> None:
+    """Valida el UID físico cuando la marcación NFC también envía el texto.
+
+    El texto NDEF identifica el punto y el UID funciona como segunda prueba: si
+    el punto tiene un UID registrado, ambos deben coincidir. Cuando el punto
+    todavía no tiene UID (etiqueta recién instalada) se acepta solo el texto.
+    """
+    if (
+        payload.nfc_code is None
+        or payload.nfc_uid is None
+        or checkpoint.uid_nfc is None
+    ):
+        return
+
+    registered_uid = normalize_uid(checkpoint.uid_nfc)
+
+    if registered_uid == payload.nfc_uid:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"El texto de la etiqueta corresponde al punto «{checkpoint.name}», "
+            f"pero el UID leído ({_format_nfc_uid(payload.nfc_uid)}) no "
+            f"coincide con el registrado "
+            f"({_format_nfc_uid(registered_uid or '')}). Actualice el UID del "
+            "punto o use la etiqueta correcta."
+        ),
+    )
 
 
 @router.get("", response_model=Paginated[RoundRead], summary="Listar rondas")
@@ -759,15 +810,18 @@ def register_checkin(
     db: DbSession,
     current_user: CurrentUser,
 ) -> RoundCheckInRead:
-    """Valida el QR/UID NFC, la ubicación y registra la marcación del guardia.
+    """Valida el QR, el texto NDEF/UID NFC, la ubicación y registra la marca.
 
     Reglas aplicadas:
 
     * Solo el guardia asignado puede marcar checkpoints de su ronda.
     * Si la ronda está pendiente, la primera marcación la inicia; una ronda
       pausada, completada o cancelada no admite marcaciones.
-    * El punto se resuelve por ``qr_code`` o por ``nfc_uid``; debe existir,
-      estar activo y pertenecer a la empresa de la ronda.
+    * El punto se resuelve por ``nfc_code`` (texto NDEF), ``nfc_uid`` o
+      ``qr_code``; debe existir, estar activo y pertenecer a la empresa de la
+      ronda.
+    * En las marcaciones NFC el texto NDEF debe ser el código del punto y, si
+      el punto tiene un UID registrado, el UID leído también debe coincidir.
     * Las marcaciones por QR exigen coordenadas del punto y del dispositivo;
       con ``ENFORCE_CHECKPOINT_GEOFENCE`` activo el dispositivo debe estar
       dentro del radio de la geovalla. Las marcaciones NFC pueden llegar sin
@@ -816,6 +870,7 @@ def register_checkin(
     ):
         existing_checkpoint = _lookup_checkpoint(db, payload)
         if existing_checkpoint is not None:
+            _ensure_nfc_uid_matches(existing_checkpoint, payload)
             existing_log = crud_round.get_round_log_for_checkpoint(
                 db, round_id, existing_checkpoint.id
             )
@@ -841,7 +896,13 @@ def register_checkin(
 
     checkpoint = _lookup_checkpoint(db, payload)
     if checkpoint is None:
-        if payload.nfc_uid is not None:
+        if payload.nfc_code is not None:
+            detail = (
+                f"El texto NDEF «{payload.nfc_code}» no corresponde al código "
+                "de ningún punto de control. Verifique que la etiqueta está "
+                "grabada con el código del punto."
+            )
+        elif payload.nfc_uid is not None:
             detail = (
                 "El UID de la etiqueta NFC no corresponde a ningún punto de "
                 "control de esta empresa. Verifique que acercó la etiqueta "
@@ -866,6 +927,10 @@ def register_checkin(
             status_code=status.HTTP_409_CONFLICT,
             detail="El punto de control está desactivado.",
         )
+
+    # Segunda prueba de las marcaciones NFC: el texto NDEF ya identificó el
+    # punto y el UID leído debe ser el registrado (si el punto tiene uno).
+    _ensure_nfc_uid_matches(checkpoint, payload)
 
     # Las marcaciones por QR siempre traen GPS y el punto debe tener una
     # geovalla configurada. Por NFC el GPS es opcional: si falta, se registra
@@ -953,9 +1018,10 @@ def register_checkin(
     log = RoundLog(
         round_id=round_obj.id,
         checkpoint_id=checkpoint.id,
-        # Para puntos NFC se guarda el UID físico de la etiqueta leída; los
-        # puntos QR siguen guardando el código escaneado.
-        nfc_tag_id=checkpoint.uid_nfc or checkpoint.code,
+        # En NFC se guarda el UID físico leído; si el cliente no lo envía, el
+        # texto NDEF y, como último recurso, el código. Los puntos QR siguen
+        # guardando el código escaneado.
+        nfc_tag_id=payload.nfc_uid or payload.nfc_code or checkpoint.code,
         checkpoint_name=checkpoint.name,
         latitude=payload.latitude,
         longitude=payload.longitude,

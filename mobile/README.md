@@ -125,15 +125,19 @@ curso no se muestra el selector: la empresa queda fijada por la ronda abierta.
    modo de la caché de checkpoints: solo usa NFC cuando ningún punto de la ronda
    es QR. No hay interruptor manual, porque cada empresa trabaja con una sola
    tecnología. El escáner muestra el cronómetro de la ronda en tiempo real,
-   alimentado por `GET /rounds/active`.
-6. `POST /rounds/{id}/checkin` recibe `{ qr_code | nfc_uid, latitude?,
-   longitude?, timestamp? }`. El backend valida que el punto exista (por código
-   o por UID), pertenezca a la empresa, no se haya marcado antes en la ronda y
-   que la ronda esté operativa. Las marcaciones QR requieren coordenadas; las
-   NFC pueden enviarse sin GPS y se guardan con distancia 0. La validación de
-   proximidad (geovalla del punto, `geofence_radius_m`, 50 m por defecto) solo
-   se aplica si `ENFORCE_CHECKPOINT_GEOFENCE=true` en el backend; está
-   desactivada por defecto y la distancia se guarda igualmente en el log.
+   alimentado por `GET /rounds/active`. Cada etiqueta debe llevar grabado como
+   texto NDEF el código del punto (`NFC-EMP2-PT03`): ese texto es el
+   identificador principal de la marcación y el UID físico funciona como
+   segunda comprobación.
+6. `POST /rounds/{id}/checkin` recibe `{ nfc_code?, nfc_uid?, qr_code?,
+   latitude?, longitude?, timestamp? }`, con al menos un identificador. El
+   backend valida que el punto exista (por texto NDEF, UID o código QR),
+   pertenezca a la empresa, no se haya marcado antes en la ronda y que la ronda
+   esté operativa. Las marcaciones QR requieren coordenadas; las NFC pueden
+   enviarse sin GPS y se guardan con distancia 0. La validación de proximidad
+   (geovalla del punto, `geofence_radius_m`, 50 m por defecto) solo se aplica si
+   `ENFORCE_CHECKPOINT_GEOFENCE=true` en el backend; está desactivada por
+   defecto y la distancia se guarda igualmente en el log.
    `timestamp` es opcional y permite conservar la hora real de una marcación que
    se sincroniza más tarde. La respuesta incluye la distancia, el tiempo del
    tramo y si la ronda quedó completa.

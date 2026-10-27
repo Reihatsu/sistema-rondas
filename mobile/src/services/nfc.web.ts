@@ -19,7 +19,10 @@ export class NfcError extends Error {
 }
 
 export interface NfcTagRead {
+  /** UID canónico: hexadecimal en mayúsculas y sin separadores. */
   uid: string;
+  /** Texto NDEF leído de la etiqueta; `null` si no contiene uno. */
+  text: string | null;
   techTypes: string[];
 }
 

@@ -157,12 +157,18 @@ class RoundCheckpointRead(BaseModel):
 class RoundCheckInCreate(BaseModel):
     """Payload de la marcación de un checkpoint por QR o NFC.
 
-    Debe enviarse al menos uno de los dos identificadores:
+    Debe enviarse al menos uno de ``qr_code``, ``nfc_code`` o ``nfc_uid``:
 
     * ``qr_code``: contenido leído del código impreso. Exige coordenadas GPS
       porque la geovalla del punto se valida con ellas.
-    * ``nfc_uid``: UID físico leído de la etiqueta. Las coordenadas son
-      opcionales: si no se envían, la marcación se registra con distancia 0.
+    * ``nfc_code``: texto NDEF grabado en la etiqueta. Es el código único del
+      punto (``NFC-EMP2-PT03``) y el identificador principal de la marcación
+      NFC. Las coordenadas son opcionales: si no se envían, la marcación se
+      registra con distancia 0.
+    * ``nfc_uid``: UID físico leído de la etiqueta. Junto a ``nfc_code`` actúa
+      como validación secundaria: si el punto tiene un UID registrado, ambos
+      deben coincidir. Se mantiene también como identificador único para
+      clientes antiguos que aún no envían el texto NDEF.
     """
 
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -174,11 +180,21 @@ class RoundCheckInCreate(BaseModel):
         examples=["QR-EMP1-PT01"],
         description="Contenido leído del código QR (código único del punto).",
     )
+    nfc_code: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+        examples=["NFC-EMP2-PT03"],
+        description=(
+            "Texto NDEF leído de la etiqueta NFC (código único del punto). "
+            "Conserva los guiones del código."
+        ),
+    )
     nfc_uid: str | None = Field(
         default=None,
         min_length=4,
         max_length=100,
-        examples=["04A23B4C5D6E"],
+        examples=["0491D8A2064F80"],
         description="UID físico de la etiqueta NFC leída por el dispositivo.",
     )
     latitude: float | None = Field(
@@ -210,6 +226,18 @@ class RoundCheckInCreate(BaseModel):
             return None
         return value.strip().upper() or None
 
+    @field_validator("nfc_code")
+    @classmethod
+    def normalize_nfc_code(cls, value: str | None) -> str | None:
+        """Canoniza el texto NDEF sin perder los guiones del código.
+
+        No se usa ``normalize_uid``: ese helper elimina todo lo que no sea
+        alfanumérico y convertiría ``NFC-EMP2-PT03`` en ``NFCEMP2PT03``.
+        """
+        if value is None:
+            return None
+        return value.strip().upper() or None
+
     @field_validator("nfc_uid")
     @classmethod
     def normalize_nfc_uid(cls, value: str | None) -> str | None:
@@ -225,8 +253,8 @@ class RoundCheckInCreate(BaseModel):
     @model_validator(mode="after")
     def validate_marking(self) -> "RoundCheckInCreate":
         """Valida el identificador y las coordenadas según la tecnología."""
-        if self.qr_code is None and self.nfc_uid is None:
-            raise ValueError("Debe indicar qr_code o nfc_uid")
+        if self.qr_code is None and self.nfc_code is None and self.nfc_uid is None:
+            raise ValueError("Debe indicar qr_code, nfc_code o nfc_uid")
         if (self.latitude is None) != (self.longitude is None):
             raise ValueError("Debe indicar latitud y longitud juntas")
         if self.qr_code is not None and self.latitude is None:

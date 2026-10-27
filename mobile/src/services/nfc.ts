@@ -17,8 +17,8 @@
  * dispositivo no tiene NFC.
  */
 
-import NfcManager, { NfcEvents } from 'react-native-nfc-manager';
-import type { TagEvent } from 'react-native-nfc-manager';
+import NfcManager, { Ndef, NfcEvents } from 'react-native-nfc-manager';
+import type { NdefRecord, TagEvent } from 'react-native-nfc-manager';
 
 import { canonicalNfcUid } from '@/services/nfcUid';
 
@@ -39,6 +39,14 @@ export class NfcError extends Error {
 export interface NfcTagRead {
   /** UID canónico: hexadecimal en mayúsculas y sin separadores. */
   uid: string;
+  /**
+   * Texto del primer registro NDEF de tipo texto, o `null` si la etiqueta no
+   * tiene NDEF o solo contiene registros que no son de texto.
+   *
+   * El código del punto de control (`NFC-EMP2-PT03`) se graba en la etiqueta
+   * como texto NDEF; el UID queda como validación secundaria.
+   */
+  text: string | null;
   /** Tecnologías detectadas por el sistema (solo informativo). */
   techTypes: string[];
 }
@@ -151,6 +159,38 @@ async function ensureNfcEnabled(): Promise<void> {
 }
 
 /**
+ * Extrae el texto del primer registro NDEF de tipo texto.
+ *
+ * Android entrega el payload como arreglo de bytes e iOS también lo expone
+ * como bytes, por eso se decodifica con `Ndef.text.decodePayload`, que descarta
+ * el código de idioma del registro. Un registro ilegible no debe romper la
+ * lectura: se ignora y se prueba con el siguiente.
+ */
+function readNdefText(records: NdefRecord[] | undefined): string | null {
+  if (!records?.length) {
+    return null;
+  }
+
+  for (const record of records) {
+    if (!Ndef.isType(record, Ndef.TNF_WELL_KNOWN, Ndef.RTD_TEXT)) {
+      continue;
+    }
+
+    try {
+      const text = Ndef.text.decodePayload(Uint8Array.from(record.payload));
+
+      if (typeof text === 'string' && text.trim()) {
+        return text;
+      }
+    } catch (error) {
+      console.warn('[nfc] Registro NDEF de texto ilegible:', error);
+    }
+  }
+
+  return null;
+}
+
+/**
  * Inicia una sesión NFC pasiva que entrega cada etiqueta detectada.
  *
  * Se usa en la pantalla de ronda activa para que el guardia solo acerque el
@@ -188,7 +228,11 @@ export async function startNfcTagListener(
         return;
       }
 
-      onTag({ uid, techTypes: tag?.techTypes ?? [] });
+      onTag({
+        uid,
+        text: readNdefText(tag?.ndefMessage),
+        techTypes: tag?.techTypes ?? [],
+      });
     };
 
     NfcManager.setEventListener(NfcEvents.DiscoverTag, handleDiscoverTag);

@@ -250,8 +250,9 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
   `POST /api/v1/rounds/start-new` (solo `GUARD`: crea e inicia la ronda con los
   checkpoints activos de la empresa; acepta `company_id` opcional cuando el
   guardia tiene varias empresas), `GET /api/v1/rounds/{id}/checkpoints`,
-  `POST /api/v1/rounds/{id}/checkin` (acepta `qr_code` **o** `nfc_uid`, y
-  `timestamp` opcional para marcaciones offline), `POST /api/v1/rounds/{id}/start`
+  `POST /api/v1/rounds/{id}/checkin` (acepta `nfc_code`, `nfc_uid` o
+  `qr_code`, y `timestamp` opcional para marcaciones offline),
+  `POST /api/v1/rounds/{id}/start`
 - `POST /api/v1/rounds/{id}/pause` (`{comment}` obligatorio),
   `POST /api/v1/rounds/{id}/resume`, `POST /api/v1/rounds/{id}/cancel`
   (`{reason}` obligatorio)
@@ -266,9 +267,12 @@ Las reglas se aplican en el backend (`app/api/v1/rounds.py`, `users.py`,
   `company_id` elegido en el selector; si se omite, se usa la primera empresa
   activa con puntos operativos. Si ya tiene una ronda en curso o pausada
   responde `409` para evitar duplicados (el bloqueo lo aplica el servidor).
-- La marcación (`POST /rounds/{id}/checkin`) se resuelve por `qr_code` o por
-  `nfc_uid`. El UID se normaliza a hexadecimal en mayúsculas sin separadores,
-  igual que se guarda en `checkpoints.uid_nfc`.
+- La marcación (`POST /rounds/{id}/checkin`) se resuelve por `nfc_code`
+  (texto NDEF de la etiqueta), `nfc_uid` (UID físico) o `qr_code`. El texto
+  NDEF debe ser el `code` del punto (`NFC-EMP2-PT03`) y se canoniza sin perder
+  los guiones; si el punto tiene `uid_nfc` registrado, el UID enviado también
+  debe coincidir. El UID se normaliza a hexadecimal en mayúsculas sin
+  separadores, igual que se guarda en `checkpoints.uid_nfc`.
 - El cronómetro se calcula en el servidor: `elapsed_seconds` descuenta
   `paused_seconds` y se congela en pausas y cierres.
 - `GET /rounds/history` devuelve por defecto las rondas de las últimas 24 horas

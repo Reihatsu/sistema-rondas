@@ -56,8 +56,8 @@ import { useOfflineQueue } from '@/hooks/use-offline-queue';
 import { useTheme } from '@/hooks/use-theme';
 import { cacheRoundCheckpoints } from '@/services/checkpointCache';
 import { getCurrentCoordinates, type CurrentCoordinates } from '@/services/location';
-import { startNfcTagListener, type NfcTagListener } from '@/services/nfc';
-import { canonicalNfcUid, formatNfcUid } from '@/services/nfcUid';
+import { startNfcTagListener, type NfcTagListener, type NfcTagRead } from '@/services/nfc';
+import { canonicalNfcText, describeNfcTagFailure, findCheckpointByNfcTag } from '@/services/nfcTag';
 import { isNetworkRequestError } from '@/services/offlineQueue';
 import { formatClock, formatDuration, formatTime, secondsUntil } from '@/utils/datetime';
 
@@ -270,7 +270,12 @@ export default function RondasScreen() {
   const roundRef = useRef<RoundDetail | null>(null);
   const checkpointsRef = useRef<RoundCheckpoint[]>([]);
   const nfcSubmittingRef = useRef(false);
-  const lastNfcTagRef = useRef<{ uid: string; at: number } | null>(null);
+  /**
+   * Última etiqueta procesada. La clave es el texto NDEF (o el UID si la
+   * etiqueta no tiene texto) para no repetir el mismo aviso mientras la
+   * etiqueta sigue apoyada sobre el lector.
+   */
+  const lastNfcTagRef = useRef<{ key: string; at: number } | null>(null);
 
   // Base del cronómetro: tiempo del backend + instante local de sincronización.
   const timerBaseRef = useRef<{ elapsed: number; at: number } | null>(null);
@@ -457,13 +462,17 @@ export default function RondasScreen() {
     'QR';
 
   /**
-   * Procesa una etiqueta leída en modo pasivo: busca el punto por UID y reutiliza
-   * exactamente el mismo flujo de marcación que el escáner QR (API + cola
-   * offline). El GPS es opcional en NFC, por lo que un fallo de ubicación no
+   * Procesa una etiqueta leída en modo pasivo y reutiliza exactamente el mismo
+   * flujo de marcación que el escáner QR (API + cola offline).
+   *
+   * La etiqueta se identifica por el **texto NDEF**, que debe ser el código del
+   * punto (`NFC-EMP2-PT03`). El UID se valida además contra el registrado en el
+   * punto: si cualquiera de los dos no coincide, se muestra un error indicando
+   * cuál falló. El GPS es opcional en NFC, por lo que un fallo de ubicación no
    * impide registrar la visita.
    */
   const handleNfcTag = useCallback(
-    async (tag: { uid: string; techTypes: string[] }) => {
+    async (tag: NfcTagRead) => {
       if (nfcSubmittingRef.current) {
         return;
       }
@@ -474,19 +483,27 @@ export default function RondasScreen() {
         return;
       }
 
-      const normalizedUid = canonicalNfcUid(tag.uid);
-      const checkpoint = checkpointsRef.current.find((item) =>
-        canonicalNfcUid(item.uid_nfc) === normalizedUid,
-      );
+      const match = findCheckpointByNfcTag(tag, checkpointsRef.current);
 
-      if (!checkpoint) {
+      if (!match.ok) {
+        console.warn(
+          `[rondas] Etiqueta NFC rechazada (${match.reason}):`,
+          match.text || '(sin texto NDEF)',
+          match.uid,
+        );
         Vibration.vibrate([0, 80, 60, 80]);
         setNfcFeedback({
           tone: 'error',
-          message: `La etiqueta ${formatNfcUid(normalizedUid)} no pertenece a esta ronda. Acerque una etiqueta registrada.`,
+          message: describeNfcTagFailure(match),
         });
         return;
       }
+
+      const checkpoint = match.checkpoint;
+      const nfcUid = match.uid;
+      // Se envía el código canónico del punto: es el mismo valor que el texto
+      // NDEF validado y el que el backend resuelve contra `checkpoints.code`.
+      const nfcCode = checkpoint.code;
 
       if (checkpoint.is_visited) {
         Vibration.vibrate(120);
@@ -501,7 +518,7 @@ export default function RondasScreen() {
       Vibration.vibrate(60);
       setNfcFeedback({
         tone: 'info',
-        message: `Etiqueta leída: ${checkpoint.name}. Registrando marcación…`,
+        message: `Etiqueta leída: ${checkpoint.name} (${nfcCode}). Registrando marcación…`,
       });
 
       // El NFC no depende del GPS; si el permiso o el servicio fallan, se envía
@@ -520,7 +537,8 @@ export default function RondasScreen() {
             round_id: currentRound.id,
             checkpoint_id: checkpoint.id,
             checkpoint_name: checkpoint.name,
-            nfc_uid: normalizedUid,
+            nfc_code: nfcCode,
+            nfc_uid: nfcUid,
             latitude: coordinates?.latitude ?? null,
             longitude: coordinates?.longitude ?? null,
             timestamp,
@@ -540,7 +558,8 @@ export default function RondasScreen() {
 
         try {
           const response = await checkIn(currentRound.id, {
-            nfc_uid: normalizedUid,
+            nfc_code: nfcCode,
+            nfc_uid: nfcUid,
             latitude: coordinates?.latitude ?? null,
             longitude: coordinates?.longitude ?? null,
             timestamp,
@@ -594,14 +613,17 @@ export default function RondasScreen() {
 
         const now = Date.now();
         const previous = lastNfcTagRef.current;
-
         // La misma etiqueta puede notificarse varias veces si se deja apoyada
-        // sobre el lector; se ignora durante unos segundos.
-        if (previous?.uid === tag.uid && now - previous.at < 3000) {
+        // sobre el lector; se ignora durante unos segundos. La clave es el
+        // texto NDEF (identificador principal) y, si no lo hay, el UID, para
+        // que el aviso de "sin texto NDEF" no se repita en bucle.
+        const key = canonicalNfcText(tag.text) || tag.uid;
+
+        if (previous?.key === key && now - previous.at < 3000) {
           return;
         }
 
-        lastNfcTagRef.current = { uid: tag.uid, at: now };
+        lastNfcTagRef.current = { key, at: now };
         void handleNfcTag(tag);
       },
       {
@@ -1241,8 +1263,11 @@ export default function RondasScreen() {
         ) : null}
 
         {round && isInProgress && scanPointType === 'NFC' ? (
+          // React Native 0.88 en Android rechaza `accessibilityRole="status"` y
+          // cierra la app al montar esta vista. `accessibilityLiveRegion` anuncia
+          // los cambios del lector sin usar un rol inválido.
           <View
-            accessibilityRole="status"
+            accessibilityLiveRegion="polite"
             style={[
               styles.fab,
               styles.nfcDock,

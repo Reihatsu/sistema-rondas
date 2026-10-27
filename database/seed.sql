@@ -69,15 +69,25 @@ VALUES
     (3, 1, 'Bodega Principal', 'QR-EMP1-PT03', NULL,
      'Puerta de acceso a la bodega principal, sector de carga.',
      40.414700, -3.709500, 50, 1),
-    (4, 2, 'Portal Marítimo', 'NFC-EMP2-PT01', '04A23B4C5D6E80',
+    (4, 2, 'Portal Marítimo', 'NFC-EMP2-PT01', '0439D3A2064F80',
      'Torno peatonal del portal marítimo, junto al control de accesos.',
      39.464100, -0.331500, 50, 1),
-    (5, 2, 'Muelle de Carga', 'NFC-EMP2-PT02', '04B34C5D6E7F91',
+    (5, 2, 'Muelle de Carga', 'NFC-EMP2-PT02', '04B830A2064F80',
      'Etiqueta adherida a la columna 4 del muelle de carga, sector norte.',
      39.463400, -0.330900, 40, 1),
-    (6, 2, 'Cuarto de Máquinas', 'NFC-EMP2-PT03', '04C45D6E7F80A2',
+    (6, 2, 'Cuarto de Máquinas', 'NFC-EMP2-PT03', '0491D8A2064F80',
      'Puerta del cuarto de máquinas, nivel sótano del edificio técnico.',
      39.464900, -0.332100, 30, 1);
+
+-- Las etiquetas NFC demo usan ahora los UID físicos reales. Si una base creada
+-- con un seed anterior conserva los UID ficticios, se actualizan aquí; un UID
+-- cargado manualmente desde la aplicación no se toca.
+UPDATE `checkpoints` SET `uid_nfc` = '0439D3A2064F80'
+WHERE `code` = 'NFC-EMP2-PT01' AND `uid_nfc` = '04A23B4C5D6E80';
+UPDATE `checkpoints` SET `uid_nfc` = '04B830A2064F80'
+WHERE `code` = 'NFC-EMP2-PT02' AND `uid_nfc` = '04B34C5D6E7F91';
+UPDATE `checkpoints` SET `uid_nfc` = '0491D8A2064F80'
+WHERE `code` = 'NFC-EMP2-PT03' AND `uid_nfc` = '04C45D6E7F80A2';
 
 
 -- --- Rondas ----------------------------------------------------------------
@@ -133,9 +143,9 @@ VALUES
      240, DATE_SUB(NOW(), INTERVAL 55 MINUTE), 'OK'),
     (3, 2, 'QR-EMP1-PT02', 'Estacionamiento Nivel -1',
      1500, DATE_SUB(NOW(), INTERVAL 32 MINUTE), 'OK'),
-    (5, 4, '04A23B4C5D6E80', 'Portal Marítimo',
+    (5, 4, '0439D3A2064F80', 'Portal Marítimo',
      180, DATE_SUB(NOW(), INTERVAL 92 MINUTE), 'OK'),
-    (5, 5, '04B34C5D6E7F91', 'Muelle de Carga',
+    (5, 5, '04B830A2064F80', 'Muelle de Carga',
      480, DATE_SUB(NOW(), INTERVAL 87 MINUTE), 'OK'),
-    (5, 6, '04C45D6E7F80A2', 'Cuarto de Máquinas',
+    (5, 6, '0491D8A2064F80', 'Cuarto de Máquinas',
      780, DATE_SUB(NOW(), INTERVAL 82 MINUTE), 'OK');

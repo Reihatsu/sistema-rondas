@@ -175,12 +175,17 @@ export interface RoundCheckpoint {
 /**
  * Payload de `POST /rounds/{id}/checkin` (`RoundCheckInCreate`).
  *
- * Debe enviarse `qr_code` o `nfc_uid`:
+ * Debe enviarse al menos uno de `qr_code`, `nfc_code` o `nfc_uid`:
  * - `qr_code` exige `latitude` y `longitude` para validar la geovalla.
- * - `nfc_uid` admite coordenadas nulas (marcación sin GPS).
+ * - `nfc_code` es el texto NDEF de la etiqueta y debe ser el código del punto.
+ *   Admite coordenadas nulas (marcación sin GPS).
+ * - `nfc_uid` es el UID físico de la etiqueta; el backend lo valida además
+ *   contra el UID registrado en el punto cuando se envía junto a `nfc_code`.
  */
 export interface CheckInPayload {
   qr_code?: string;
+  /** Texto NDEF leído de la etiqueta NFC (código único del punto). */
+  nfc_code?: string;
   /** UID de la etiqueta NFC, en hexadecimal mayúsculas y sin separadores. */
   nfc_uid?: string;
   latitude?: number | null;
