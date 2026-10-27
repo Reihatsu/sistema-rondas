@@ -6,12 +6,7 @@
  * resuelve este archivo automáticamente en la plataforma `web`.
  */
 
-export type NfcFailureReason =
-  | 'unsupported'
-  | 'disabled'
-  | 'timeout'
-  | 'read'
-  | 'cancelled';
+export type NfcFailureReason = 'unsupported' | 'disabled' | 'read';
 
 export class NfcError extends Error {
   readonly reason: NfcFailureReason;
@@ -36,33 +31,13 @@ export interface NfcTagListener {
   stop: () => Promise<void>;
 }
 
-interface ReadNfcTagOptions {
-  timeoutMs?: number;
-  alertMessage?: string;
-}
-
 const WEB_UNSUPPORTED_MESSAGE =
   'La lectura NFC solo está disponible en la app móvil. En el navegador use el código QR.';
-
-/** En web nunca hay lector NFC. */
-export async function isNfcSupported(): Promise<boolean> {
-  return false;
-}
 
 export async function startNfcTagListener(
   _onTag: (tag: NfcTagRead) => void,
   _options: NfcTagListenerOptions = {},
 ): Promise<NfcTagListener> {
   throw new NfcError('unsupported', WEB_UNSUPPORTED_MESSAGE);
-}
-
-export async function readNfcTag(
-  _options: ReadNfcTagOptions = {},
-): Promise<NfcTagRead> {
-  throw new NfcError('unsupported', WEB_UNSUPPORTED_MESSAGE);
-}
-
-export function cancelNfcScan(): void {
-  // No hay sesión NFC en web: nada que cancelar.
 }
 

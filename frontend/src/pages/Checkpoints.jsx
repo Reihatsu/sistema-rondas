@@ -49,6 +49,25 @@ function normalizeNfcUid(value) {
     .replace(/[^0-9A-Z]/g, "");
 }
 
+/**
+ * Tecnología real del punto.
+ *
+ * La empresa es la autoridad: un punto NFC puede no tener UID todavía y aun así
+ * no debe ofrecer código QR. El código interno (`NFC-…`) se usa solo como
+ * respaldo para datos antiguos que no traen la relación de empresa.
+ */
+function pointTypeOf(checkpoint) {
+  const companyType = checkpoint?.company?.point_type;
+  if (companyType === "NFC" || companyType === "QR") return companyType;
+
+  const explicitType = checkpoint?.point_type;
+  if (explicitType === "NFC" || explicitType === "QR") return explicitType;
+
+  return String(checkpoint?.code || "").trim().toUpperCase().startsWith("NFC-")
+    ? "NFC"
+    : "QR";
+}
+
 /** Convierte un número del formulario a ``number | null``. */
 function toNumberOrNull(value) {
   const text = String(value ?? "").trim();
@@ -304,6 +323,12 @@ export default function Checkpoints() {
   }
 
   function openQr(checkpoint) {
+    // Los puntos NFC no tienen código QR que imprimir, aunque todavía no
+    // tengan un UID físico registrado.
+    if (pointTypeOf(checkpoint) !== "QR") {
+      return;
+    }
+
     setQrTarget(checkpoint);
     setQrError("");
   }
@@ -539,24 +564,33 @@ export default function Checkpoints() {
                   </td>
                 </tr>
               ) : (
-                items.map((checkpoint) => (
-                  <tr key={checkpoint.id}>
+                items.map((checkpoint) => {
+                  const rowPointType = pointTypeOf(checkpoint);
+
+                  return (
+                    <tr key={checkpoint.id}>
                     <td>
                       <div className="min-w-[150px]">
                         <span className="inline-flex items-center gap-1.5 rounded bg-slate-100 px-2 py-1 font-mono text-[11px] font-semibold text-slate-700">
-                          {checkpoint.uid_nfc ? (
+                          {rowPointType === "NFC" ? (
                             <Nfc className="h-3 w-3" aria-hidden="true" />
                           ) : (
                             <QrCode className="h-3 w-3" aria-hidden="true" />
                           )}
                           {checkpoint.code}
                         </span>
-                        {checkpoint.uid_nfc ? (
+                        {rowPointType === "NFC" ? (
                           <p
                             className="mt-1 truncate font-mono text-[10px] text-slate-500"
-                            title={`UID NFC ${checkpoint.uid_nfc}`}
+                            title={
+                              checkpoint.uid_nfc
+                                ? `UID NFC ${checkpoint.uid_nfc}`
+                                : "UID NFC pendiente de registrar"
+                            }
                           >
-                            UID {checkpoint.uid_nfc}
+                            {checkpoint.uid_nfc
+                              ? `UID ${checkpoint.uid_nfc}`
+                              : "UID NFC pendiente"}
                           </p>
                         ) : null}
                       </div>
@@ -578,8 +612,7 @@ export default function Checkpoints() {
                           `Empresa #${checkpoint.company_id}`}
                       </Badge>
                       <span className="mt-1 block text-[10px] uppercase tracking-wide text-slate-400">
-                        {POINT_TYPE_LABELS[checkpoint.company?.point_type] ||
-                          (checkpoint.uid_nfc ? POINT_TYPE_LABELS.NFC : POINT_TYPE_LABELS.QR)}
+                        {POINT_TYPE_LABELS[rowPointType] || rowPointType}
                       </span>
                     </td>
                     <td>
@@ -592,7 +625,7 @@ export default function Checkpoints() {
                     </td>
                     <td className="cell-actions">
                       <div className="inline-flex items-center gap-1">
-                        {checkpoint.uid_nfc ? null : (
+                        {rowPointType === "QR" ? (
                           <button
                             type="button"
                             className="btn btn-ghost btn-icon"
@@ -602,7 +635,7 @@ export default function Checkpoints() {
                           >
                             <QrCode className="h-4 w-4" aria-hidden="true" />
                           </button>
-                        )}
+                        ) : null}
                         {canManage ? (
                           <>
                             <button
@@ -646,7 +679,8 @@ export default function Checkpoints() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

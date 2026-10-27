@@ -1,10 +1,9 @@
 /**
- * Escaneo del punto de control con validación GPS.
+ * Escaneo del punto de control por código QR con validación GPS.
  *
- * La pantalla se adapta a la tecnología de la empresa:
- *
- * * QR: permiso de cámara → lectura del código → ubicación actual → marcación.
- * * NFC: lectura del UID de la etiqueta → marcación (el GPS es opcional).
+ * Flujo: permiso de cámara → lectura del código → ubicación actual → marcación.
+ * Los puntos NFC **no** pasan por esta pantalla: se leen de forma pasiva en
+ * `RondasScreen` mientras el guardia permanece en la vista de la ronda activa.
  *
  * El backend es la autoridad final: valida el código/UID, la geovalla y los
  * duplicados, y devuelve mensajes en español que se muestran al guardia.
@@ -13,8 +12,7 @@
  * APK cuando `expo-camera` se declara en `app.json` con su plugin y
  * `barcodeScannerEnabled: true`. Los config plugins se aplican durante el
  * prebuild, así que cualquier cambio allí exige recompilar el APK (no basta una
- * actualización OTA ni recargar el bundle). El lector NFC usa el plugin
- * `react-native-nfc-manager`, también nativo.
+ * actualización OTA ni recargar el bundle).
  */
 
 import {
@@ -39,7 +37,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { getErrorMessage } from '@/api/client';
 import { checkIn, getActiveRound, listRoundCheckpoints } from '@/api/rounds';
-import type { CheckInResult, PointType } from '@/api/types';
+import type { CheckInResult } from '@/api/types';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
@@ -54,8 +52,7 @@ import {
   LocationError,
   type CurrentCoordinates,
 } from '@/services/location';
-import { cancelNfcScan, isNfcSupported, NfcError, readNfcTag } from '@/services/nfc';
-import { canonicalNfcUid, formatNfcUid } from '@/services/nfcUid';
+import { canonicalNfcUid } from '@/services/nfcUid';
 import { isNetworkRequestError } from '@/services/offlineQueue';
 import { formatClock } from '@/utils/datetime';
 
@@ -64,12 +61,11 @@ const SUCCESS = '#1E7F4F';
 const DANGER = '#D93025';
 const WARNING = '#B26A00';
 
-type Phase = 'scanning' | 'reading' | 'locating' | 'sending' | 'success' | 'error' | 'queued';
+type Phase = 'scanning' | 'locating' | 'sending' | 'success' | 'error' | 'queued';
 
-/** Identificador leído del punto: código QR o UID de la etiqueta NFC. */
+/** Identificador leído del punto: el código QR impreso. */
 interface CheckpointIdentifier {
-  qrCode?: string;
-  nfcUid?: string;
+  qrCode: string;
 }
 
 /**
@@ -113,22 +109,6 @@ function vibrateFeedback() {
     Vibration.vibrate(60);
   } catch {
     // En Android sin permiso VIBRATE la vibración no está disponible.
-  }
-}
-
-/**
- * Confirmación de una etiqueta NFC válida: dos pulsos cortos, como el pitido de
- * un lector físico. La app no incluye un motor de audio nativo.
- */
-function vibrateNfcSuccess() {
-  if (Platform.OS === 'web') {
-    return;
-  }
-
-  try {
-    Vibration.vibrate([0, 60, 80, 60]);
-  } catch {
-    // La vibración es opcional: el resultado también se muestra en pantalla.
   }
 }
 
@@ -181,7 +161,7 @@ export default function QRScannerScreen() {
   const { enqueue: queueCheckIn, isOnline, pendingCount } = useOfflineQueue();
 
   const [phase, setPhase] = useState<Phase>('scanning');
-  /** `true` en cuanto el sensor lee un QR o el NFC una etiqueta: bloquea el reinicio. */
+  /** `true` en cuanto el sensor lee un QR: bloquea reinicios hasta confirmar. */
   const [scanned, setScanned] = useState(false);
   const [detectedCode, setDetectedCode] = useState<string | null>(null);
   // Se incrementa para remontar la CameraView: expo-camera solo conecta el
@@ -194,8 +174,6 @@ export default function QRScannerScreen() {
   const [isExpired, setIsExpired] = useState(false);
   const [canOpenSettings, setCanOpenSettings] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
-  /** `null` mientras se consulta; `false` si el dispositivo no tiene lector NFC. */
-  const [nfcSupported, setNfcSupported] = useState<boolean | null>(null);
   const [timerBase, setTimerBase] = useState<{
     elapsed: number;
     at: number;
@@ -207,14 +185,8 @@ export default function QRScannerScreen() {
   const roundIdText = Array.isArray(rawRoundId) ? rawRoundId[0] : rawRoundId;
   const from = Array.isArray(rawFrom) ? rawFrom[0] : rawFrom;
   const pointTypeText = Array.isArray(rawPointType) ? rawPointType[0] : rawPointType;
-  /** Tecnología deducida de los puntos cuando la pantalla se abre sin `pointType`. */
-  const [inferredPointType, setInferredPointType] = useState<PointType | null>(null);
-  /** Tecnología de los puntos de la empresa: decide cámara (QR) o lector (NFC). */
-  const scanMode: PointType =
-    pointTypeText === 'NFC' || pointTypeText === 'QR'
-      ? pointTypeText
-      : (inferredPointType ?? 'QR');
-  const isNfcMode = scanMode === 'NFC';
+  /** Enlaces antiguos podían abrir `/scan?pointType=NFC`; ahora se redirigen. */
+  const isLegacyNfcRoute = pointTypeText === 'NFC';
   const roundId = Number(roundIdText);
   const hasValidRound = Number.isInteger(roundId) && roundId > 0;
 
@@ -249,7 +221,6 @@ export default function QRScannerScreen() {
   }, []);
 
   const resetScanner = useCallback(() => {
-    cancelNfcScan();
     setResult(null);
     setErrorMessage(null);
     setQueuedCheckpoint(null);
@@ -262,45 +233,23 @@ export default function QRScannerScreen() {
     setPhase('scanning');
   }, []);
 
-  // Una sesión NFC abierta se cierra al salir de la pantalla; si no, el lector
-  // queda bloqueado hasta reiniciar la app.
-  useEffect(() => () => cancelNfcScan(), []);
-
-  // Solo la app nativa puede leer NFC; en web el botón queda deshabilitado.
+  // Red de seguridad para enlaces antiguos o rutas guardadas que todavía
+  // apunten a `/scan?pointType=NFC`: el NFC se lee en la pantalla de la ronda.
   useEffect(() => {
-    if (!isNfcMode) {
+    if (!isLegacyNfcRoute) {
       return;
     }
 
-    let cancelled = false;
-
-    void isNfcSupported().then((supported) => {
-      if (!cancelled) {
-        setNfcSupported(supported);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isNfcMode]);
-
-  // Si la pantalla se abre sin `pointType` (enlace directo o vuelta desde otra
-  // vista), el modo se deduce de la tecnología de los puntos: solo se pasa a
-  // NFC cuando ningún punto de la ronda es QR.
-  useEffect(() => {
-    if (pointTypeText === 'QR' || pointTypeText === 'NFC') {
+    if (hasValidRound) {
+      router.replace({
+        pathname: '/rondas',
+        params: { roundId: String(roundId) },
+      });
       return;
     }
 
-    const types = new Set(
-      cachedCheckpoints.map((checkpoint) => checkpoint.point_type),
-    );
-
-    if (types.has('NFC') && !types.has('QR')) {
-      setInferredPointType('NFC');
-    }
-  }, [cachedCheckpoints, pointTypeText]);
+    router.replace('/rondas');
+  }, [hasValidRound, isLegacyNfcRoute, roundId, router]);
 
   // Cronómetro del escáner: parte del tiempo que calcula el backend y avanza
   // solo mientras la ronda está en curso.
@@ -396,28 +345,12 @@ export default function QRScannerScreen() {
     [cachedCheckpoints],
   );
 
-  // Las etiquetas se comparan sin prefijos ni separadores: el lector entrega el
-  // UID como `04:A2:3B:...` y la caché lo guarda ya canonicalizado.
-  const checkpointByUid = useMemo(() => {
-    const entries: Array<[string, CachedRoundCheckpoint]> = [];
-
-    cachedCheckpoints.forEach((checkpoint) => {
-      const uid = canonicalNfcUid(checkpoint.uid_nfc);
-
-      if (uid) {
-        entries.push([uid, checkpoint]);
-      }
-    });
-
-    return new Map(entries);
-  }, [cachedCheckpoints]);
-
   const liveElapsed = timerBase
     ? timerBase.elapsed +
       (timerBase.running ? Math.floor((tick - timerBase.at) / 1000) : 0)
     : null;
 
-  /** Guarda la marcación en la cola local; el GPS puede faltar en NFC. */
+  /** Guarda la marcación QR en la cola local cuando no hay conexión. */
   const saveCheckInForLater = useCallback(
     async (
       identifier: CheckpointIdentifier,
@@ -428,12 +361,9 @@ export default function QRScannerScreen() {
       const item = await queueCheckIn({
         round_id: roundId,
         checkpoint_id: checkpoint?.id ?? null,
-        checkpoint_name:
-          checkpoint?.name ??
-          identifier.qrCode ??
-          (identifier.nfcUid ? `Etiqueta NFC ${formatNfcUid(identifier.nfcUid)}` : 'Punto de control'),
-        qr_code: identifier.qrCode ?? null,
-        nfc_uid: identifier.nfcUid ?? null,
+        checkpoint_name: checkpoint?.name ?? identifier.qrCode,
+        qr_code: identifier.qrCode,
+        nfc_uid: null,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
         timestamp,
@@ -469,7 +399,6 @@ export default function QRScannerScreen() {
       try {
         const response = await checkIn(roundId, {
           qr_code: identifier.qrCode,
-          nfc_uid: identifier.nfcUid,
           latitude: coordinates?.latitude ?? null,
           longitude: coordinates?.longitude ?? null,
           timestamp,
@@ -495,7 +424,7 @@ export default function QRScannerScreen() {
     [isOnline, roundId, saveCheckInForLater],
   );
 
-  /** Mensaje de error y estado final compartidos por ambos lectores. */
+  /** Mensaje de error y estado final del escáner QR. */
   const handleScanFailure = useCallback((scanError: unknown) => {
     if (scanError instanceof LocationError) {
       setCanOpenSettings(
@@ -573,88 +502,17 @@ export default function QRScannerScreen() {
     [checkpointByCode, handleScanFailure, hasValidRound, roundId, scanned, submitCheckIn],
   );
 
-  /**
-   * Lectura NFC del punto de control.
-   *
-   * Se espera la etiqueta, se resuelve el checkpoint por UID y se marca. El GPS
-   * aquí es opcional: si el permiso está denegado o el dispositivo tarda, la
-   * marcación se envía igual y el servidor la acepta sin geovalla (el NFC ya
-   * demuestra la presencia física en el punto).
-   */
-  const handleNfcTagRead = useCallback(async () => {
-    if (busyRef.current || scanned || !hasValidRound) {
-      return;
-    }
-
-    busyRef.current = true;
-    setScanned(true);
-    setDetectedCode(null);
-    setErrorMessage(null);
-    setCanOpenSettings(false);
-    setPhase('reading');
-
-    try {
-      const tag = await readNfcTag();
-
-      console.log('NFC Detectado:', tag.uid);
-      setDetectedCode(tag.uid);
-      vibrateNfcSuccess();
-
-      let coordinates: CurrentCoordinates | null = null;
-      setPhase('locating');
-
-      try {
-        coordinates = await getCurrentCoordinates();
-      } catch (locationError) {
-        if (!(locationError instanceof LocationError)) {
-          throw locationError;
-        }
-
-        // Sin GPS la marcación NFC sigue siendo válida.
-        console.log('Marcación NFC sin coordenadas:', locationError.code);
-      }
-
-      let checkpoint = checkpointByUid.get(tag.uid);
-
-      if (!checkpoint) {
-        const cached = await getCachedRoundCheckpoints(roundId);
-        checkpoint = cached.find(
-          (item) => canonicalNfcUid(item.uid_nfc) === tag.uid,
-        );
-
-        if (checkpoint) {
-          setCachedCheckpoints(cached);
-        }
-      }
-
-      await submitCheckIn({ nfcUid: tag.uid }, coordinates, checkpoint);
-    } catch (scanError) {
-      // Cancelar (salir de la pantalla o volver a escanear) no es un error del
-      // guardia: se vuelve al estado inicial sin mensaje.
-      if (scanError instanceof NfcError && scanError.reason === 'cancelled') {
-        setPhase((current) =>
-          current === 'reading' || current === 'locating' ? 'scanning' : current,
-        );
-        setScanned(false);
-        return;
-      }
-
-      if (scanError instanceof NfcError && scanError.reason === 'disabled') {
-        setCanOpenSettings(true);
-      }
-
-      handleScanFailure(scanError);
-    } finally {
-      busyRef.current = false;
-    }
-  }, [
-    checkpointByUid,
-    handleScanFailure,
-    hasValidRound,
-    roundId,
-    scanned,
-    submitCheckIn,
-  ]);
+  // Mientras el efecto redirige un enlace NFC antiguo, evita montar la cámara.
+  if (isLegacyNfcRoute) {
+    return (
+      <View style={styles.permissionLoading}>
+        <ActivityIndicator color="#FFFFFF" size="large" />
+        <ThemedText type="small" style={styles.onAccent}>
+          Abriendo la ronda…
+        </ThemedText>
+      </View>
+    );
+  }
 
   if (!hasValidRound) {
     return (
@@ -681,7 +539,7 @@ export default function QRScannerScreen() {
     );
   }
 
-  if (!isNfcMode && !permission) {
+  if (!permission) {
     return (
       <View style={styles.permissionLoading}>
         <ActivityIndicator color="#FFFFFF" size="large" />
@@ -692,7 +550,7 @@ export default function QRScannerScreen() {
     );
   }
 
-  if (!isNfcMode && !permission?.granted) {
+  if (!permission?.granted) {
     return (
       <ThemedView style={styles.fallbackContainer}>
         <SafeAreaView style={styles.fallbackSafeArea} edges={['top', 'bottom']}>
@@ -748,8 +606,7 @@ export default function QRScannerScreen() {
     );
   }
 
-  const isSubmitting =
-    phase === 'reading' || phase === 'locating' || phase === 'sending';
+  const isSubmitting = phase === 'locating' || phase === 'sending';
 
   // El `key` remonta la CameraView: expo-camera solo conecta el analizador
   // nativo de códigos cuando (re)crea la cámara, así que volver a escanear tras
@@ -762,25 +619,20 @@ export default function QRScannerScreen() {
   // duplicadas se hace dentro de `handleBarcodeScanned` con `scanned`/`busyRef`.
   return (
     <View style={styles.container}>
-      {isNfcMode ? (
-        // Sin cámara: el fondo negro y el panel NFC ocupan toda la pantalla.
-        <View style={StyleSheet.absoluteFill} />
-      ) : (
-        <CameraView
-          key={cameraKey}
-          style={StyleSheet.absoluteFill}
-          facing="back"
-          enableTorch={torchEnabled}
-          barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
-          onBarcodeScanned={handleBarcodeScanned}
-          onCameraReady={() => {
-            console.log('Escáner QR listo: cámara inicializada');
-          }}
-          onMountError={(event) => {
-            console.log('Error al iniciar la cámara:', event.message);
-          }}
-        />
-      )}
+      <CameraView
+        key={cameraKey}
+        style={StyleSheet.absoluteFill}
+        facing="back"
+        enableTorch={torchEnabled}
+        barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
+        onBarcodeScanned={handleBarcodeScanned}
+        onCameraReady={() => {
+          console.log('Escáner QR listo: cámara inicializada');
+        }}
+        onMountError={(event) => {
+          console.log('Error al iniciar la cámara:', event.message);
+        }}
+      />
 
       <View style={styles.overlay} pointerEvents="box-none">
         <SafeAreaView style={styles.overlaySafeArea} edges={['top', 'bottom']}>
@@ -797,10 +649,10 @@ export default function QRScannerScreen() {
             </Pressable>
 
             <ThemedText type="smallBold" style={styles.onAccent}>
-              {isNfcMode ? 'Leer etiqueta NFC' : 'Escanear checkpoint'}
+              Escanear checkpoint
             </ThemedText>
 
-            {isNfcMode || Platform.OS === 'web' ? (
+            {Platform.OS === 'web' ? (
               <View style={styles.iconButton} />
             ) : (
               <Pressable
@@ -824,71 +676,12 @@ export default function QRScannerScreen() {
             )}
           </View>
 
-          {isNfcMode ? (
-            <View style={styles.nfcCenterArea}>
-              <View style={styles.nfcBadge}>
-                <ThemedText type="code" style={styles.onAccent}>
-                  NFC
-                </ThemedText>
-              </View>
-
-              <ThemedText type="subtitle" style={styles.nfcTitle}>
-                Acerca el móvil a la etiqueta
-              </ThemedText>
-
-              <ThemedText type="small" style={styles.hintText}>
-                {nfcSupported === false
-                  ? 'Este dispositivo no tiene lector NFC. Solicite al administrador un punto con código QR.'
-                  : 'Sostenga la parte trasera del teléfono junto al punto de control y pulse el botón.'}
-              </ThemedText>
-
-              {isSubmitting ? (
-                <View style={styles.busyCard}>
-                  <ActivityIndicator color="#FFFFFF" />
-                  <View style={styles.busyTextGroup}>
-                    <ThemedText type="smallBold" style={styles.onAccent}>
-                      {phase === 'reading'
-                        ? 'Esperando la etiqueta NFC…'
-                        : 'Validando y registrando…'}
-                    </ThemedText>
-                    {detectedCode ? (
-                      <ThemedText
-                        type="code"
-                        style={styles.footerHint}
-                        numberOfLines={1}>
-                        {formatNfcUid(detectedCode)}
-                      </ThemedText>
-                    ) : null}
-                  </View>
-                </View>
-              ) : (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Leer la etiqueta NFC del punto de control"
-                  accessibilityState={{ disabled: nfcSupported === false }}
-                  disabled={nfcSupported === false}
-                  onPress={() => {
-                    void handleNfcTagRead();
-                  }}
-                  style={({ pressed }) => [
-                    styles.nfcButton,
-                    nfcSupported === false ? styles.nfcButtonDisabled : null,
-                    { opacity: pressed ? 0.85 : 1 },
-                  ]}>
-                  <ThemedText type="smallBold" style={styles.onAccent}>
-                    Leer etiqueta NFC
-                  </ThemedText>
-                </Pressable>
-              )}
-            </View>
-          ) : (
-            <View style={styles.centerArea} pointerEvents="none">
-              <View style={styles.scanFrame} />
-              <ThemedText type="small" style={styles.hintText}>
-                Apunte al código QR del punto de control
-              </ThemedText>
-            </View>
-          )}
+          <View style={styles.centerArea} pointerEvents="none">
+            <View style={styles.scanFrame} />
+            <ThemedText type="small" style={styles.hintText}>
+              Apunte al código QR del punto de control
+            </ThemedText>
+          </View>
 
           <View style={styles.bottomArea} pointerEvents="none">
             {liveElapsed !== null ? (
@@ -902,12 +695,7 @@ export default function QRScannerScreen() {
               </View>
             ) : null}
 
-            {isNfcMode ? (
-              <ThemedText type="small" style={styles.footerHint}>
-                La etiqueta confirma su paso por el punto; el GPS se añade solo si
-                está disponible.
-              </ThemedText>
-            ) : isSubmitting ? (
+            {isSubmitting ? (
               <View style={styles.busyCard}>
                 <ActivityIndicator color="#FFFFFF" />
                 <View style={styles.busyTextGroup}>
@@ -940,9 +728,7 @@ export default function QRScannerScreen() {
           variant="success"
           title={result.round_completed ? '¡Ronda completada!' : 'Checkpoint registrado'}
           message={[
-            isNfcMode && result.distance_m <= 0
-              ? `${result.checkpoint.name} · verificado con la etiqueta NFC.`
-              : `${result.checkpoint.name} · a ${Math.round(result.distance_m)} m del punto.`,
+            `${result.checkpoint.name} · a ${Math.round(result.distance_m)} m del punto.`,
             result.checkpoint.elapsed_seconds !== null
               ? `Tiempo acumulado: ${formatClock(result.checkpoint.elapsed_seconds)}`
               : null,
@@ -973,7 +759,7 @@ export default function QRScannerScreen() {
                 onPress={resetScanner}
                 style={styles.primaryButton}>
                 <ThemedText type="smallBold" style={styles.onAccent}>
-                  {isNfcMode ? 'Leer otra etiqueta' : 'Escanear otro'}
+                  Escanear otro
                 </ThemedText>
               </Pressable>
               <Pressable
@@ -1046,11 +832,7 @@ export default function QRScannerScreen() {
           {isExpired ? null : (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={
-                isNfcMode
-                  ? 'Volver a leer la etiqueta NFC'
-                  : 'Volver a escanear el código QR'
-              }
+              accessibilityLabel="Volver a escanear el código QR"
               onPress={resetScanner}
               style={styles.primaryButton}>
               <ThemedText type="smallBold" style={styles.onAccent}>
@@ -1167,39 +949,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: Spacing.three,
     backgroundColor: '#000000',
-  },
-  nfcCenterArea: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.three,
-    paddingHorizontal: Spacing.four,
-  },
-  nfcBadge: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.85)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  nfcTitle: {
-    color: '#FFFFFF',
-    textAlign: 'center',
-  },
-  nfcButton: {
-    backgroundColor: ACCENT,
-    borderRadius: Spacing.three,
-    minHeight: 52,
-    minWidth: 220,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: Spacing.three,
-    paddingHorizontal: Spacing.four,
-  },
-  nfcButtonDisabled: {
-    backgroundColor: 'rgba(255, 255, 255, 0.16)',
   },
   fallbackContainer: {
     flex: 1,

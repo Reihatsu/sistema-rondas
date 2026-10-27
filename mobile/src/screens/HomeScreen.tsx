@@ -126,10 +126,12 @@ export default function HomeScreen() {
   );
 
   /**
-   * Crea una ronda nueva desde el servidor y abre directamente el escáner.
+   * Crea una ronda nueva desde el servidor y abre el flujo que corresponde.
    *
-   * Antes de crear se consulta la ronda activa: si existe, se evita el `409`
-   * del backend y se ofrece continuarla para no dejar una ronda huérfana.
+   * Las empresas QR abren el escáner; las empresas NFC van directamente a la
+   * pantalla de la ronda, donde el lector pasivo se activa solo. Antes de crear
+   * se consulta la ronda activa: si existe, se evita el `409` del backend y se
+   * ofrece continuarla para no dejar una ronda huérfana.
    */
   async function handleStartNewRound() {
     if (!isGuard || isStartingRound || companies.length === 0) {
@@ -163,13 +165,24 @@ export default function HomeScreen() {
       }
 
       const created = await startNewRound(selectedCompanyId ?? undefined);
+      const createdPointType =
+        created.company?.point_type ??
+        companies.find((company) => company.id === created.company_id)?.point_type ??
+        'QR';
+
+      // NFC se lee de forma pasiva en la pantalla de la ronda: no se abre una
+      // pantalla intermedia ni se muestra un botón para leer la etiqueta.
+      if (createdPointType === 'NFC') {
+        router.push('/rondas');
+        return;
+      }
 
       router.push({
         pathname: '/scan',
         params: {
           roundId: String(created.id),
           from: 'home',
-          pointType: created.company?.point_type ?? 'QR',
+          pointType: 'QR',
         },
       });
     } catch (startError) {

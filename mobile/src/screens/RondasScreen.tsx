@@ -447,11 +447,14 @@ export default function RondasScreen() {
 
   /**
    * Tecnología de los puntos con la que debe abrirse el escáner. La empresa de
-   * la ronda activa manda; si aún no hay ronda se usa la empresa seleccionada
-   * para iniciarla.
+   * la ronda activa manda; si aún no se cargó la ronda, se usan los puntos y la
+   * empresa seleccionada para iniciarla.
    */
   const scanPointType: PointType =
-    round?.company?.point_type ?? selectedCompany?.point_type ?? 'QR';
+    round?.company?.point_type ??
+    checkpoints.find((checkpoint) => checkpoint.point_type)?.point_type ??
+    selectedCompany?.point_type ??
+    'QR';
 
   /**
    * Procesa una etiqueta leída en modo pasivo: busca el punto por UID y reutiliza
@@ -732,6 +735,7 @@ export default function RondasScreen() {
 
     try {
       const created = await startNewRound(selectedCompanyId ?? undefined);
+      const createdPointType = created.company?.point_type ?? scanPointType;
 
       // La ronda ya está en curso: se pinta de inmediato para que el
       // cronómetro arranque aunque la consulta de checkpoints tarde.
@@ -749,12 +753,18 @@ export default function RondasScreen() {
         setCheckpoints([]);
       }
 
+      // En NFC el lector pasivo de esta misma pantalla toma el control cuando
+      // los checkpoints terminan de cargarse: no se navega a `/scan`.
+      if (createdPointType === 'NFC') {
+        return;
+      }
+
       router.push({
         pathname: '/scan',
         params: {
           roundId: String(created.id),
           from: 'rounds',
-          pointType: created.company?.point_type ?? scanPointType,
+          pointType: 'QR',
         },
       });
     } catch (startError) {
